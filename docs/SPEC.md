@@ -10,6 +10,14 @@ Jisho Lens is a Windows desktop tool for reading Japanese text in games. You pre
 
 The goal is **learning to read**, not just understanding the game, so the Japanese comes first and the English is opt-in.
 
+### 1.1 Target text (from the game UI scan)
+A scan of 144 frames from a 7-hour Azur Promilia beta playthrough ([research/ui-text-scan.md](research/ui-text-scan.md)) shaped the OCR requirements. The two main use cases are:
+
+1. **Story dialogue:** white text with a soft shadow drawn directly over the 3D scene (no box), centered at the bottom, with the speaker's name above it in a pale blue. Often low contrast on bright scenes; often caught mid-line because of the letter-by-letter effect and fast-forward.
+2. **Menus and descriptions:** dark text on light parchment-style panels (crafting, quests, encyclopedia, confirmations, loading tips, story summaries). Easiest to read and richest in vocabulary.
+
+Also seen: HUD quest tracker and prompts (small, semi-transparent), tutorial text with inline key icons, and combat HUD text (tiny, moving, covered by effects, so not a target).
+
 ### Goals
 - On-demand capture of horizontal Japanese game text.
 - Word-level lookup with context-correct readings, romaji, meanings, and kanji details.
@@ -67,14 +75,24 @@ The goal is **learning to read**, not just understanding the game, so the Japane
 - Pluggable engine interface. Engines:
   - **RapidOCR** (PaddleOCR PP-OCR models via ONNX Runtime). Default unless the Phase 0 test says otherwise. CPU by default; GPU optional.
   - **Windows OCR** (`Windows.Media.Ocr`). Needs the Japanese OCR language capability installed in Windows.
-- Preprocessing before OCR: upscale small text (2–3×), optional sharpen / contrast / invert for light-on-dark text. Configurable per capture or as default.
-- Lines are joined into one text block, keeping line breaks.
+- Preprocessing before OCR (see §1.1 for why each step exists):
+  - **Upscale** small text (2–3×).
+  - **Contrast boost and white-text isolation** (keep bright, low-saturation pixels): required, not optional. About a quarter of dialogue lines in the scan were white text on bright backgrounds.
+  - **Automatic polarity:** detect light-on-dark vs dark-on-light and invert when needed. The same game panel can appear in both themes.
+  - Optional sharpen.
+  - A preprocessing preset can be chosen per capture or set as the default; the user can retry a capture with another preset from the main window.
+- **Capture delay** option (e.g. 0 / 0.5 / 1 s after the selection is confirmed), because dialogue appears letter by letter and is often caught mid-line.
+- Post-OCR cleanup:
+  - **Speaker name line:** a short line directly above dialogue in a different colour is shown as the speaker, separate from the sentence.
+  - **Inline key and mouse icons** (boxed single letters such as [Q], [F], [T]) are removed or marked so they don't reach word analysis.
+  - Lines are joined into one text block, keeping line breaks.
 
 **Text analysis**
 - Morphological analysis with **fugashi + UniDic** (MeCab). For each token: surface form, lemma (dictionary form), part of speech, conjugation type and form, kana reading, pronunciation.
 - **Readings in context** come from UniDic (今日 → きょう). Particles use pronunciation (は → wa, を → o, へ → e).
 - **Romaji** via **cutlet** (Hepburn).
 - **Furigana** alignment: furigana covers only the kanji part (食べる → た over 食). Kana-only words get none.
+- Numbers, counters and symbols common in game UI (7/20, 418%, +53, ×1, 【】, ——, ……, （火）) pass through unchanged as non-clickable tokens and don't break word splitting around them.
 - Output is a list of tokens rendered as clickable HTML spans with `<ruby>` for furigana.
 
 **Main window**
@@ -108,6 +126,8 @@ The goal is **learning to read**, not just understanding the game, so the Japane
   - Katakana loanwords show the source word (JMdict `lsource`).
   - When a surface form matches several entries, the entry whose reading matches UniDic's reading is shown first.
 - **Kanji popup:** on'yomi, kun'yomi (with the reading used here highlighted), meanings, stroke count, grade, JLPT level, a few common words using the kanji.
+- **Not in dictionary:** game names and coined terms (キボ, スターリンク, ステラカード, アニマ, character and place names) are common. The popup clearly says the word isn't in the dictionary, still shows the reading and romaji from the core, and offers the per-kanji breakdown for any kanji in it.
+- Later (not in v1): a user glossary to add your own meanings for game terms.
 - If the module is disabled, clicking a word shows only the reading and romaji from the core.
 
 ### 3.3 Translation — DeepL (default)
@@ -227,7 +247,8 @@ The core never imports a module directly; it only talks through these points. A 
 ## 10. Risks
 | Risk | Mitigation |
 |---|---|
-| OCR accuracy on stylized game fonts and busy backgrounds | Phase 0 test on real games; preprocessing options; two engines; editable text |
+| OCR accuracy on low-contrast dialogue (white text on bright scenes) and busy backgrounds | Phase 0 test set built from the UI scan categories; contrast boost, white-text isolation and auto polarity; two engines; retry with another preset; editable text |
+| Text captured mid-line (letter-by-letter dialogue) | Capture delay option; re-capture button |
 | DPI scaling / multi-monitor coordinate bugs | Per-monitor DPI v2 from day one; test at 100/125/150% and mixed setups |
 | Installing modules after install with a bundled Python | Packaging spike in Phase 0 before building the module system on top |
 | Exclusive fullscreen games | Document borderless windowed; nothing else planned |
@@ -238,3 +259,4 @@ The core never imports a module directly; it only talks through these points. A 
 - Full UniDic (~1 GB, more accurate) or `unidic-lite` (~50 MB, older)? Decide after Phase 0 measurements.
 - Default hotkey: is `Ctrl+Alt+J` free in your games?
 - Where module releases are hosted (e.g. GitHub Releases on the project repo).
+- User glossary for game terms: core feature or part of the Dictionary module? (Not in v1.)

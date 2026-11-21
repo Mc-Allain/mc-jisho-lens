@@ -39,7 +39,17 @@ mc-jisho-lens/
 Goal: answer the risky questions before building on them.
 
 - [ ] Repo setup: `uv`, Python 3.12, `ruff`, `pytest`, `.gitignore`, git init.
-- [ ] **OCR test:** take 20–30 screenshots from your actual games; run RapidOCR and Windows OCR with and without preprocessing; compare character accuracy and speed. Pick the default engine.
+- [ ] **OCR test set:** about 30 screenshots from the actual game (after the November 26 release), cropped the way a user would select them, with the correct text typed out for each. Cover the categories from [research/ui-text-scan.md](research/ui-text-scan.md):
+  - Dialogue on dark or neutral scenes (≈6)
+  - Dialogue on bright scenes: cream, cyan, pale sky, white glow (≈6), the hardest case
+  - Dialogue with the speaker name line included (≈3)
+  - Menus and descriptions, dark text on light panels (≈6)
+  - Loading tips in both the light and the dark version (≈2)
+  - Tutorial text and prompts with inline key icons (≈3)
+  - Quest tracker (≈2)
+  - Snow-area HUD (white on white) (≈2)
+- [ ] **OCR test:** run RapidOCR and Windows OCR on the set, each with no preprocessing, upscale only, and upscale + contrast / white-text isolation + auto polarity. Compare character accuracy per category and speed. Pick the default engine and default preprocessing preset.
+- [ ] Set a target: e.g. ≥ 95% character accuracy on dialogue and menus with the default preset (combat HUD excluded).
 - [ ] **Capture test:** screenshot + region select on each monitor at 100/125/150% scaling; confirm the pixels match.
 - [ ] **Packaging test:** bundle the app with its own Python runtime, install it, then install a dummy module (with one pip dependency) *after* installation. Confirm it loads. Pick the installer tool.
 - [ ] **Size check:** installed size with Qt WebEngine and UniDic full vs lite.
@@ -50,7 +60,10 @@ Done when: default OCR engine chosen, packaging approach proven, UniDic variant 
 - [ ] Tray icon and menu; single instance.
 - [ ] Global hotkey (`RegisterHotKey`), configurable.
 - [ ] Frozen, dimmed capture overlay across all monitors; drag to select, `Esc` to cancel.
-- [ ] OCR engine interface + default engine + preprocessing.
+- [ ] OCR engine interface + default engine + preprocessing presets (upscale, contrast / white-text isolation, auto polarity).
+- [ ] Capture delay option (0 / 0.5 / 1 s).
+- [ ] Post-OCR cleanup: speaker name line detection, removal of inline key / mouse icons.
+- [ ] "Retry with another preset" from the main window.
 - [ ] Main window (always on top, no focus stealing, excluded from capture) showing plain Japanese text.
 - [ ] Edit / Copy / Re-capture buttons.
 - [ ] Settings file + basic Settings window (hotkey, OCR engine).
@@ -62,7 +75,8 @@ Done when: hotkey → select → Japanese text appears in the window.
 - [ ] Furigana alignment (kanji part only), romaji via cutlet, particle pronunciation.
 - [ ] WebEngine view: tokens as clickable spans, `<ruby>` furigana, romaji line.
 - [ ] Furigana / romaji toggles; basic word popup showing reading + romaji only.
-- [ ] Unit tests for furigana alignment and romaji on tricky cases (今日, 食べられなかった, は/を/へ, long vowels, っ).
+- [ ] Numbers, counters and symbols (7/20, 418%, +53, ×1, 【】, ——, ……, （火）) pass through as non-clickable tokens.
+- [ ] Unit tests for furigana alignment and romaji on tricky cases (今日, 食べられなかった, は/を/へ, long vowels, っ), plus real lines from the UI scan.
 
 Done when: clicking a word shows its reading in context.
 
@@ -79,6 +93,7 @@ Done when: modules can add popup buttons, window buttons, settings pages and ser
 - [ ] Lookup by lemma + reading, ranked by reading match and commonness.
 - [ ] Word popup: meanings by part of speech, conjugation breakdown, particle notes, loanword source, common/JLPT markers.
 - [ ] Kanji popup: on/kun readings (current one highlighted), meanings, strokes, grade, JLPT, example words.
+- [ ] "Not in dictionary" state for game terms and names: reading + romaji + per-kanji breakdown.
 - [ ] Attribution in an About screen.
 
 Done when: word and kanji popups are complete and work offline.
@@ -122,7 +137,7 @@ Done when: one click puts a full card into Anki, and it syncs to the phone.
 - [ ] Installer with optional module checkboxes, start-menu entry, uninstaller.
 - [ ] Third-party notices and licences.
 - [ ] Logging, crash reporting to a local log file.
-- [ ] README with setup steps (Japanese OCR capability, Japanese voice, DeepL key, AnkiConnect).
+- [ ] README with setup steps (Japanese OCR capability, Japanese voice, DeepL key, AnkiConnect) and capture tips (wait for the line to finish, select tightly, use borderless windowed mode).
 
 ## Order note
 Phases 4–6 don't depend on each other once Phase 3 is done, so they can be built in any order.
