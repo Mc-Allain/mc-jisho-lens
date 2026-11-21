@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
 from jisho_lens.core.analysis import Token
 from jisho_lens.core.ocr import ENGINE_NAMES
 from jisho_lens.core.ocr.preprocess import PRESETS
-from jisho_lens.ui.render import page_for_message, page_for_tokens
+from jisho_lens.dictionary.enrich import PageDictionary
+from jisho_lens.ui.render import page_for_message, page_for_plain, page_for_tokens
 from jisho_lens.ui.winapi import exclude_from_capture
 
 
@@ -50,6 +51,7 @@ class MainWindow(QWidget):
         self._lines: list[str] = []
         self._speaker: str | None = None
         self._message: tuple[str, bool] | None = None
+        self._dictionary: PageDictionary | None = None
 
         self.speaker_label = QLabel()
         self.speaker_label.setStyleSheet("color: #a9cfff; font-weight: bold; font-size: 15px;")
@@ -142,8 +144,13 @@ class MainWindow(QWidget):
         self._set_buttons_enabled(True)
 
     def show_text(self, lines: list[str], tokens: list[list[Token]], speaker: str | None,
-                  status: str | None = None) -> None:
+                  status: str | None = None, dictionary: PageDictionary | None = None) -> None:
         self._lines, self._tokens, self._speaker = list(lines), tokens, speaker
+        self._dictionary = dictionary
+        has_words = bool(tokens)
+        for b in (self.furigana_btn, self.romaji_btn):
+            b.setEnabled(has_words)
+            b.setToolTip("" if has_words else "Word splitting is off (Settings)")
         self._message = None
         self.speaker_label.setText(speaker or "")
         if status is not None:
@@ -162,9 +169,12 @@ class MainWindow(QWidget):
         elif not self._lines:
             html = page_for_message("No Japanese text found. Try Retry with another engine or "
                                     "preset, or Edit.", self._font_size)
+        elif not self._tokens:
+            html = page_for_plain(self._lines, self._font_size)
         else:
             html = page_for_tokens(self._tokens, self._font_size,
-                                   self.furigana_btn.isChecked(), self.romaji_btn.isChecked())
+                                   self.furigana_btn.isChecked(), self.romaji_btn.isChecked(),
+                                   self._dictionary)
         self.view.setHtml(html)
 
     def _display_toggled(self) -> None:

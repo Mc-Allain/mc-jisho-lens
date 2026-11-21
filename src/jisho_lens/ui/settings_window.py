@@ -1,4 +1,4 @@
-"""Basic settings window (Phase 1: hotkey, capture, OCR, display)."""
+"""Settings window: hotkey, capture, OCR, display, word splitting and components."""
 
 from __future__ import annotations
 
@@ -18,16 +18,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from jisho_lens.components import is_installed as components_installed
+from jisho_lens.core.analysis import SPLITTING_LABELS, SPLITTING_MODES, available_modes
 from jisho_lens.core.hotkey import parse_hotkey
 from jisho_lens.core.ocr import ENGINE_NAMES
 from jisho_lens.core.ocr.preprocess import PRESETS
 from jisho_lens.core.settings import Settings
+from jisho_lens.ui.components_panel import ComponentsPanel
 
 DELAYS = [0.0, 0.5, 1.0, 2.0]
 
 
 class SettingsWindow(QDialog):
     applied = Signal(object)  # Settings
+    components_changed = Signal(list)  # component ids installed / removed
 
     def __init__(self, settings: Settings, hotkey_ok: bool = True) -> None:
         super().__init__(None, Qt.WindowType.WindowStaysOnTopHint)
@@ -65,6 +69,15 @@ class SettingsWindow(QDialog):
         self.font_size.setRange(12, 48)
         self.font_size.setValue(settings.window.font_size)
 
+        # Word splitting: None or an installed UniDic. Dictionaries are used when installed.
+        self.splitting = QComboBox()
+        self.splitting_hint = QLabel()
+        self.splitting_hint.setWordWrap(True)
+        self.splitting_hint.setStyleSheet("color: #8a8f99;")
+        self._fill_splitting(settings.analysis.word_splitting)
+        self.components = ComponentsPanel(self)
+        self.components.changed.connect(self._components_changed)
+
         form = QFormLayout()
         form.addRow("Capture hotkey", self.hotkey)
         form.addRow("", self.hotkey_hint)
@@ -74,6 +87,8 @@ class SettingsWindow(QDialog):
         form.addRow("", self.remove_icons)
         form.addRow("", self.speaker)
         form.addRow("Text size", self.font_size)
+        form.addRow("Word splitting", self.splitting)
+        form.addRow("", self.splitting_hint)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -83,7 +98,37 @@ class SettingsWindow(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addWidget(self.components)
         layout.addWidget(buttons)
+
+    def _fill_splitting(self, current: str) -> None:
+        """None, plus every installed UniDic."""
+        availability = available_modes()
+        self.splitting.clear()
+        for mode in SPLITTING_MODES:
+            if availability.get(mode) is None:
+                self.splitting.addItem(SPLITTING_LABELS[mode], mode)
+        idx = self.splitting.findData(current)
+        self.splitting.setCurrentIndex(idx if idx >= 0 else self.splitting.findData("none"))
+        self.splitting_hint.setText(
+            "" if self.splitting.count() > 1 else
+            "Install UniDic-lite or full UniDic below for clickable words, readings and "
+            "dictionaries.")
+
+    def _components_changed(self, changed: list) -> None:
+        current = self.splitting.currentData()
+        newly = {"unidic-lite": "lite", "unidic-full": "full"}
+        # select a word splitter that was just installed if none was selected
+        for cid in changed:
+            if cid in newly and components_installed(cid) and current == "none":
+                current = newly[cid]
+        self._fill_splitting(current)
+        self.components_changed.emit(changed)
+
+    def reject(self) -> None:  # noqa: D102
+        if self.components.busy:
+            return  # don't close while installing / removing
+        super().reject()
 
     def _accept(self) -> None:
         seq = self.hotkey.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
@@ -100,5 +145,6 @@ class SettingsWindow(QDialog):
         self._settings.capture.remove_key_icons = self.remove_icons.isChecked()
         self._settings.capture.detect_speaker = self.speaker.isChecked()
         self._settings.window.font_size = self.font_size.value()
+        self._settings.analysis.word_splitting = self.splitting.currentData() or "none"
         self.applied.emit(self._settings)
         self.accept()

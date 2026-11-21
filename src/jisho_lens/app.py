@@ -15,8 +15,9 @@ from PySide6.QtCore import QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from jisho_lens import __version__
-from jisho_lens.core.analysis import shared_analyzer
+from jisho_lens import __version__, components
+from jisho_lens.core.analysis import SPLITTING_MODES
+from jisho_lens.core.analysis.pipeline import analyze_text
 from jisho_lens.core.capture import Rect, grab_desktop, grab_rect
 from jisho_lens.core.displays import describe_displays, enable_per_monitor_dpi_awareness
 from jisho_lens.core.hotkey import HotkeyManager
@@ -70,7 +71,8 @@ class JishoLens:
         self.ocr.engine_ready.connect(
             lambda name, s: log.info("engine %s ready (%.1fs)", name, s))
         self.ocr.engine_failed.connect(self._on_engine_failed)
-        self.ocr.preload(self.settings.ocr.engine)
+        self._check_word_splitting()
+        self._preload()
 
         self._build_tray()
 
@@ -113,12 +115,20 @@ class JishoLens:
         menu.addAction("Show window", self.show_window)
         menu.addSeparator()
         menu.addAction("Settings…", self.open_settings)
+        menu.addAction("About…", self.open_about)
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)
         self._tray_menu = menu
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def open_about(self) -> None:
+        from jisho_lens.ui.about import AboutWindow
+
+        self._about = AboutWindow()
+        self._about.setWindowIcon(app_icon())
+        self._about.show()
 
     def _on_tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
@@ -176,6 +186,8 @@ class JishoLens:
             image, engine, preset,
             remove_key_icons=self.settings.capture.remove_key_icons,
             detect_speaker=self.settings.capture.detect_speaker,
+            splitting=self.settings.analysis.word_splitting,
+            dictionary=self.settings.analysis.dictionary_active,
         )
 
     def _retry(self, engine: str, preset: str) -> None:
@@ -189,12 +201,40 @@ class JishoLens:
             return  # an older job finished after a newer one was started
         self.tray.setIcon(app_icon())
         status = f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
-        self.window.show_text(outcome.cleaned.lines, outcome.tokens, outcome.cleaned.speaker,
-                              status)
+        self._show_analysis(outcome.cleaned.lines, outcome.analysis, outcome.cleaned.speaker,
+                            status)
+
+    def _show_analysis(self, lines, analysis, speaker, status) -> None:
+        if analysis.warning:
+            status = f"{status} · {analysis.warning}"
+        self.window.show_text(lines, analysis.tokens, speaker, status, analysis.dictionary)
 
     def _on_text_edited(self, lines: list[str]) -> None:
-        tokens = shared_analyzer().analyze(lines)
-        self.window.show_text(lines, tokens, self.window._speaker, "Edited")
+        a = self.settings.analysis
+        analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
+        self._show_analysis(lines, analysis, self.window._speaker, "Edited")
+
+    def _check_word_splitting(self) -> bool:
+        """Fall back to plain text when the selected UniDic isn't installed. True if changed."""
+        a = self.settings.analysis
+        mode = a.word_splitting
+        ok = mode == "none" or (mode in SPLITTING_MODES and components.is_installed(
+            {"lite": "unidic-lite", "full": "unidic-full"}.get(mode, "")))
+        if not ok:
+            a.word_splitting = "none"
+            self.settings.save()
+        return not ok
+
+    def _on_components_changed(self, changed: list) -> None:
+        log.info("components changed: %s; installed now: %s", changed, components.installed())
+        if self._check_word_splitting():
+            self.tray.showMessage("Jisho Lens", "Word splitting is off: its UniDic was removed.",
+                                  app_icon(), 5000)
+        self._preload()
+
+    def _preload(self) -> None:
+        a = self.settings.analysis
+        self.ocr.preload(self.settings.ocr.engine, a.word_splitting, a.dictionary_active)
 
     def _on_display_changed(self, furigana: bool, romaji: bool) -> None:
         self.settings.window.show_furigana = furigana
@@ -208,7 +248,8 @@ class JishoLens:
         self.window.show_message(f"OCR failed: {message}", error=True)
 
     def _on_engine_failed(self, name: str, message: str) -> None:
-        what = "Word splitter" if name == "dictionary" else f"OCR engine {name}"
+        what = {"splitting": "Word splitting", "jmdict": "Dictionary (meanings)"}.get(
+            name, f"OCR engine {name}")
         self.tray.showMessage("Jisho Lens", f"{what} unavailable: {message}", app_icon(), 8000)
 
     # ---------- settings ----------
@@ -220,6 +261,7 @@ class JishoLens:
         self._settings_window = SettingsWindow(self.settings, self.hotkey_ok)
         self._settings_window.setWindowIcon(app_icon())
         self._settings_window.applied.connect(self._apply_settings)
+        self._settings_window.components_changed.connect(self._on_components_changed)
         self._settings_window.finished.connect(lambda _: setattr(self, "_settings_window", None))
         self._settings_window.show()
 
@@ -235,8 +277,10 @@ class JishoLens:
                 self.tray.showMessage("Jisho Lens", f"Hotkey not set: {message}", app_icon(),
                                       6000)
                 new.capture.hotkey = self.hotkeys.current or old.capture.hotkey
-        if new.ocr.engine != old.ocr.engine:
-            self.ocr.preload(new.ocr.engine)
+        if (new.ocr.engine != old.ocr.engine
+                or new.analysis.word_splitting != old.analysis.word_splitting
+                or new.analysis.dictionary_active != old.analysis.dictionary_active):
+            self._preload()
         if self._window is not None:
             self._window.set_engine_preset(new.ocr.engine, new.ocr.preset)
             self._window.set_font_size(new.window.font_size)

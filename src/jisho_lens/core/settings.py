@@ -22,6 +22,18 @@ class OcrSettings:
 
 
 @dataclass
+class AnalysisSettings:
+    # "none" (plain text, default) | "lite" | "full": which installed UniDic splits words.
+    # The dictionaries (JMdict, KANJIDIC2, Wiktionary) are used whenever they are installed,
+    # and need word splitting. See jisho_lens.components.
+    word_splitting: str = "none"
+
+    @property
+    def dictionary_active(self) -> bool:
+        return self.word_splitting != "none"
+
+
+@dataclass
 class CaptureSettings:
     hotkey: str = "Ctrl+Alt+J"
     delay_seconds: float = 0.0
@@ -42,6 +54,7 @@ class WindowSettings:
 class Settings:
     capture: CaptureSettings = field(default_factory=CaptureSettings)
     ocr: OcrSettings = field(default_factory=OcrSettings)
+    analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
     window: WindowSettings = field(default_factory=WindowSettings)
 
     @classmethod
