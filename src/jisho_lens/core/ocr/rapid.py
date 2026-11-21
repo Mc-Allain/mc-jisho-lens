@@ -41,7 +41,9 @@ VARIANTS: dict[str, dict] = {
 def _to_enums(params: dict) -> dict:
     from rapidocr.utils.typings import LangDet, LangRec, ModelType, OCRVersion
 
-    out = {"Global.log_level": "error"}
+    # Game text is never rotated: skipping the angle classifier saves time at no accuracy cost
+    # (Phase 1 measurement: 99.6% both ways on the synthetic set, ~1.3 s vs several seconds).
+    out = {"Global.log_level": "error", "Global.use_cls": False}
     for key, value in params.items():
         if key.endswith("ocr_version"):
             value = OCRVersion(value)

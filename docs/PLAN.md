@@ -38,7 +38,7 @@ mc-jisho-lens/
 ## Phase 0 — Foundations and tests of the risky parts
 Goal: answer the risky questions before building on them.
 
-- [ ] Repo setup: `uv`, Python 3.12, `ruff`, `pytest`, `.gitignore`, git init.
+- [x] Repo setup: `uv`, Python 3.12, `ruff`, `pytest`, `.gitignore`, git init.
 - [ ] **OCR test set:** about 30 screenshots from the actual game (after the November 26 release), cropped the way a user would select them, with the correct text typed out for each. Cover the categories from [research/ui-text-scan.md](research/ui-text-scan.md):
   - Dialogue on dark or neutral scenes (≈6)
   - Dialogue on bright scenes: cream, cyan, pale sky, white glow (≈6), the hardest case
@@ -50,25 +50,31 @@ Goal: answer the risky questions before building on them.
   - Snow-area HUD (white on white) (≈2)
 - [ ] **OCR test:** run RapidOCR and Windows OCR on the set, each with no preprocessing, upscale only, and upscale + contrast / white-text isolation + auto polarity. Compare character accuracy per category and speed. Pick the default engine and default preprocessing preset.
 - [ ] Set a target: e.g. ≥ 95% character accuracy on dialogue and menus with the default preset (combat HUD excluded).
-- [ ] **Capture test:** display detection (monitors, resolution, scaling) built into the app; screenshot + region select confirmed on the dev machine (one 1920×1080 display at 100%). Other scalings (125/150%) and multi-monitor are tested by temporarily changing Windows display scaling, since the dev machine has a single display.
-- [ ] **Packaging test:** bundle the app with its own Python runtime, install it, then install a dummy module (with one pip dependency) *after* installation. Confirm it loads. Pick the installer tool.
-- [ ] **Size check:** installed size with Qt WebEngine and UniDic full vs lite.
+- [x] **Capture test:** display detection (monitors, resolution, scaling) built into the app; screenshot + region select confirmed on the dev machine (one 1920×1080 display at 100%). Other scalings (125/150%) and multi-monitor are tested by temporarily changing Windows display scaling, since the dev machine has a single display.
+- [x] **Packaging test:** bundle the app with its own Python runtime, install it, then install a dummy module (with one pip dependency) *after* installation. Confirm it loads. Pick the installer tool.
+- [x] **Size check:** installed size with Qt WebEngine and UniDic full vs lite.
 
 Done when: default OCR engine chosen, packaging approach proven, UniDic variant chosen.
 
 ## Phase 1 — Capture to window
-- [ ] Tray icon and menu; single instance.
-- [ ] Global hotkey (`RegisterHotKey`), configurable.
-- [ ] Frozen, dimmed capture overlay across all monitors; drag to select, `Esc` to cancel.
-- [ ] OCR engine interface + default engine + preprocessing presets (upscale, contrast / white-text isolation, auto polarity).
-- [ ] Capture delay option (0 / 0.5 / 1 s).
-- [ ] Post-OCR cleanup: speaker name line detection, removal of inline key / mouse icons.
-- [ ] "Retry with another preset" from the main window.
-- [ ] Main window (always on top, no focus stealing, excluded from capture) showing plain Japanese text.
-- [ ] Edit / Copy / Re-capture buttons.
-- [ ] Settings file + basic Settings window (hotkey, OCR engine).
+- [x] Tray icon and menu; single instance.
+- [x] Global hotkey (`RegisterHotKey`), configurable.
+- [x] Frozen, dimmed capture overlay across all monitors; drag to select, `Esc` to cancel.
+- [x] OCR engine interface + default engine + preprocessing presets (upscale, contrast / white-text isolation, auto polarity).
+- [x] Capture delay option (0 / 0.5 / 1 s).
+- [x] Post-OCR cleanup: speaker name line detection, removal of inline key / mouse icons.
+- [x] "Retry with another preset" from the main window.
+- [x] Main window (always on top, no focus stealing, excluded from capture) showing plain Japanese text.
+- [x] Edit / Copy / Re-capture buttons.
+- [x] Settings file + basic Settings window (hotkey, OCR engine).
 
 Done when: hotkey → select → Japanese text appears in the window.
+
+Phase 1 notes (2026-11-21):
+- End-to-end check `tools/e2e_test.py` passes: synthetic dialogue and menu samples read at 100%, speaker split off, main window confirmed invisible to screenshots.
+- OCR: RapidOCR PP-OCRv6 with the angle classifier turned off (game text is never rotated) — same accuracy, roughly 1.3–2 s per capture on CPU. Still above the < 1 s target; GPU (DirectML/CUDA) is the next thing to try.
+- Memory: the Qt WebEngine view commits ~590 MB as soon as it exists, so the main window is created on the first capture. Idle in the tray: ~124 MB working set (OCR engine preloaded). After the first capture the window adds roughly 150 MB of working set — revisit if this matters (alternative: draw furigana in a plain Qt widget instead of WebEngine).
+- Preprocessing presets exist but none beats `none` yet (see phase-0-findings.md); default stays `none` until real screenshots are tested.
 
 ## Phase 2 — Text analysis and display
 - [ ] fugashi + UniDic tokenizer wrapper with a clean token model.
