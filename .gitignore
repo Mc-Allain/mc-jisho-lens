@@ -14,3 +14,6 @@ build/
 tests/ocr_set/images/
 tools/out/
 spikes/packaging/out/
+
+# Installed components (UniDic, JMdict, KANJIDIC2, Wiktionary) and local test data; see tools/components.py
+data/

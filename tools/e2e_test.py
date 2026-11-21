@@ -37,13 +37,30 @@ X, Y = 200, 250
 
 
 def main() -> int:
-    image_path = Path(sys.argv[1]) if len(sys.argv) > 1 else SAMPLE
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("image", nargs="?", default=str(SAMPLE))
+    ap.add_argument("--click", default="", help="click the first word containing this text")
+    ap.add_argument("--kanji", action="store_true", help="then open the first kanji panel")
+    ap.add_argument("--size", default="760x560", help="main window size for the pictures")
+    ap.add_argument("--splitting", default="lite", choices=["lite", "full", "none"],
+                    help="word splitting (that UniDic component must be installed)")
+    args = ap.parse_args()
+    from jisho_lens.core.settings import Settings
+
+    s = Settings()
+    s.analysis.word_splitting = args.splitting
+    s.save()  # into the temporary JISHO_LENS_HOME
+    image_path = Path(args.image)
     truth_path = image_path.with_suffix(".txt")
     enable_per_monitor_dpi_awareness()
     setup_logging()
-    app = QApplication(sys.argv)
+    app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
     lens = JishoLens(app)
+    ww, wh = (int(v) for v in args.size.split("x"))
+    lens.window.resize(ww, wh)
     result: dict = {}
 
     label = QLabel()
@@ -79,17 +96,32 @@ def main() -> int:
 
     def click_word() -> None:
         lens.window.grab().save(str(out_dir / "e2e-1-text.png"))
-        js = ("(() => { const ws = document.querySelectorAll('.w'); if (!ws.length) return '';"
-              " const w = ws[Math.min(3, ws.length - 1)]; w.click();"
-              " return document.getElementById('pop').innerText; })()")
+        want = args.click.replace("'", "")
+        js = ("(() => { const ws = [...document.querySelectorAll('.w')]; if (!ws.length) return '';"
+              f" const w = ws.find(x => x.textContent.includes('{want}'))"
+              " || ws[Math.min(3, ws.length - 1)];"
+              " w.click(); return document.getElementById('pop').innerText; })()")
         lens.window.view.page().runJavaScript(js, 0, on_popup)
 
     def on_popup(text) -> None:
         result["popup"] = text
-        QTimer.singleShot(400, toggle_romaji)
+        QTimer.singleShot(400, kanji_or_romaji)
+
+    def kanji_or_romaji() -> None:
+        lens.window.grab().save(str(out_dir / "e2e-2-popup.png"))
+        if not args.kanji:
+            toggle_romaji()
+            return
+        js = ("(() => { const k = document.querySelector('#pop .kc'); if (!k) return '';"
+              " k.click(); return document.getElementById('pop').innerText; })()")
+        lens.window.view.page().runJavaScript(js, 0, on_kanji)
+
+    def on_kanji(text) -> None:
+        result["kanji"] = text
+        QTimer.singleShot(400, lambda: (
+            lens.window.grab().save(str(out_dir / "e2e-2b-kanji.png")), toggle_romaji()))
 
     def toggle_romaji() -> None:
-        lens.window.grab().save(str(out_dir / "e2e-2-popup.png"))
         lens.window.romaji_btn.setChecked(True)
         QTimer.singleShot(400, after_romaji)
 
@@ -129,7 +161,9 @@ def main() -> int:
         full = "\n".join(([outcome.cleaned.speaker] if outcome.cleaned.speaker else [])
                          + outcome.cleaned.lines)
         print(f"Accuracy vs truth: {char_accuracy(full, truth):.1%}")
-    print("Popup   :", (result.get("popup") or "(none)").replace("\n", " | "))
+    print("Popup   :", (result.get("popup") or "(none)").replace("\n", " | ")[:600])
+    if args.kanji:
+        print("Kanji   :", (result.get("kanji") or "(none)").replace("\n", " | ")[:400])
     rt = (result.get("romaji_text") or "").splitlines()
     print("Romaji  :", " / ".join(x for x in rt if x.isascii() and x.strip())[:200] or "(none)")
     print(f"Pictures: {out_dir / 'e2e-1-text.png'} (+ -2-popup, -3-romaji)")
