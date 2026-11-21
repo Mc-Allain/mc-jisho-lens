@@ -1,0 +1,240 @@
+# mc-jisho-lens — Specification
+
+**Display name:** Jisho Lens
+**Status:** Draft v1 (2026-11-21)
+**Platform:** Windows 10/11 (x64)
+
+## 1. Overview
+
+Jisho Lens is a Windows desktop tool for reading Japanese text in games. You press a hotkey, drag a rectangle around Japanese text on the screen, and the app reads it (OCR) and shows it in an always-on-top window. You can click any word to see how it is read in that sentence, its romaji, and its meanings, then click a kanji inside it to see all its readings. An English translation is shown only when you ask for it.
+
+The goal is **learning to read**, not just understanding the game, so the Japanese comes first and the English is opt-in.
+
+### Goals
+- On-demand capture of horizontal Japanese game text.
+- Word-level lookup with context-correct readings, romaji, meanings, and kanji details.
+- Furigana and romaji display toggles.
+- English translation via DeepL on button press.
+- Fully offline except translation.
+- Modular: optional features can be installed, enabled, disabled, and removed after installation.
+
+### Non-goals (for now)
+- Continuous / real-time screen translation.
+- Vertical text (manga).
+- Offline translation (Sugoi, local LLM). The translation layer is designed so these can be added later as modules.
+- Built-in flashcards (Anki is used instead, as an optional module).
+- Game text hooking (reading text from game memory).
+- macOS / Linux.
+
+## 2. User flow
+
+1. The app starts in the **system tray**. It does nothing until the hotkey is pressed.
+2. **Hotkey** (default `Ctrl+Alt+J`, configurable) → the screen freezes and dims across all monitors.
+3. **Drag a rectangle** around the text. `Esc` cancels. Releasing the mouse confirms.
+4. OCR reads the region. The **main window** appears (always on top) showing the Japanese text.
+5. The user can:
+   - **Click a word** → popup with reading, romaji, meanings, part of speech, and conjugation breakdown.
+   - **Click a kanji in the popup** → all on'yomi / kun'yomi, meanings, stroke count, JLPT level, example words.
+   - **Edit the text** to fix OCR mistakes; the analysis re-runs.
+   - **Toggle** furigana / romaji.
+   - Press **Translate** → English from DeepL appears below the text.
+   - (Anki module) **＋ Anki** in a word or kanji popup.
+   - (Audio module) **▶** to hear a word or the sentence.
+6. Each capture is saved to **History**, a separate screen.
+
+## 3. Module layout
+
+| Tier | Modules | State after install |
+|---|---|---|
+| **Core** | Tray + hotkey, capture, OCR, text analysis (words, furigana, romaji), main window, History, Settings, Module Manager | Always present, can't be disabled |
+| **Default** | Dictionary, Translation (DeepL) | Installed and enabled; can be disabled |
+| **Optional** | Anki, Audio (TTS) | Not installed; install any time from the installer or the Module Manager |
+
+### 3.1 Core
+
+**Tray + hotkey**
+- Tray icon with menu: Capture, Show window, History, Settings, Quit.
+- Global hotkey via Win32 `RegisterHotKey`, works while a game has focus.
+- Option: start with Windows.
+
+**Capture**
+- Take a screenshot of the full virtual desktop (all monitors) first, then show it frozen and dimmed in a borderless fullscreen overlay for selection. This avoids timing issues with moving content.
+- Per-monitor DPI awareness (v2) so the selection matches pixels at 100/125/150% scaling and on mixed-DPI setups.
+- The main window is excluded from capture (`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`).
+- Limitation: can't draw over **exclusive fullscreen** games; borderless windowed mode works.
+
+**OCR**
+- Pluggable engine interface. Engines:
+  - **RapidOCR** (PaddleOCR PP-OCR models via ONNX Runtime). Default unless the Phase 0 test says otherwise. CPU by default; GPU optional.
+  - **Windows OCR** (`Windows.Media.Ocr`). Needs the Japanese OCR language capability installed in Windows.
+- Preprocessing before OCR: upscale small text (2–3×), optional sharpen / contrast / invert for light-on-dark text. Configurable per capture or as default.
+- Lines are joined into one text block, keeping line breaks.
+
+**Text analysis**
+- Morphological analysis with **fugashi + UniDic** (MeCab). For each token: surface form, lemma (dictionary form), part of speech, conjugation type and form, kana reading, pronunciation.
+- **Readings in context** come from UniDic (今日 → きょう). Particles use pronunciation (は → wa, を → o, へ → e).
+- **Romaji** via **cutlet** (Hepburn).
+- **Furigana** alignment: furigana covers only the kanji part (食べる → た over 食). Kana-only words get none.
+- Output is a list of tokens rendered as clickable HTML spans with `<ruby>` for furigana.
+
+**Main window**
+- Always on top, resizable, remembers position and size. Shown without stealing focus from the game when a capture finishes; focus moves only when the user clicks it.
+- Shows the latest capture only (earlier captures live in History).
+- Toggles: furigana, romaji line, English.
+- Buttons: Translate, Edit, Re-capture, Copy, History.
+- Rendered in a Qt WebEngine view (HTML/CSS/JS) for ruby text and clickable spans; the HTML side talks to Python through Qt WebChannel.
+
+**History**
+- Separate screen listing past captures: thumbnail, date, Japanese text, translation if any.
+- Open a capture back in the main window; delete one or all.
+- Retention setting (e.g. keep last N captures or N days).
+
+**Settings**
+- General: hotkey, start with Windows, window behaviour, theme.
+- OCR: engine, preprocessing defaults, CPU/GPU.
+- Display: furigana / romaji defaults, font size.
+- Plus a page per enabled module.
+
+**Module Manager**
+- Lists every known module with name, description, version, size, and status: Not installed / Installed (disabled) / Enabled / Update available.
+- Actions: Install, Enable, Disable, Update, Uninstall.
+- See §4 for how modules work.
+
+### 3.2 Dictionary (default)
+- Offline SQLite database built from **JMdict** (words) and **KANJIDIC2** (kanji), shipped with the module.
+- **Word popup:** word, reading in this sentence, romaji, meanings grouped by part of speech, common-word / JLPT markers.
+  - Conjugated forms show the dictionary form and a breakdown (食べられなかった → 食べる: potential + negative + past), built from UniDic conjugation data.
+  - Particles show a short grammar note.
+  - Katakana loanwords show the source word (JMdict `lsource`).
+  - When a surface form matches several entries, the entry whose reading matches UniDic's reading is shown first.
+- **Kanji popup:** on'yomi, kun'yomi (with the reading used here highlighted), meanings, stroke count, grade, JLPT level, a few common words using the kanji.
+- If the module is disabled, clicking a word shows only the reading and romaji from the core.
+
+### 3.3 Translation — DeepL (default)
+- Translate button sends the current text to the DeepL API (Free or Pro, detected from the key).
+- Without a key, the app still works; the Translate button shows "Add a DeepL key in Settings".
+- First launch asks for the key (skippable).
+- Key stored in Windows Credential Manager (`keyring`), not in plain-text config.
+- Translations are cached per text so repeats cost nothing.
+- Built on a **translation provider interface** so other providers can be added later.
+
+### 3.4 Anki (optional)
+- Talks to Anki desktop through the **AnkiConnect** add-on (`http://127.0.0.1:8765`).
+- Creates its own note types and a deck (default `Jisho Lens`) on first use.
+- **Word note** → two cards: Reading (word → reading) and Meaning (word → meaning).
+  Fields: Word, Reading, Romaji, Meanings, PartOfSpeech, Sentence (word highlighted), Screenshot, Audio, Source (game name / tag).
+- **Kanji note** → one card. Fields: Kanji, Onyomi, Kunyomi, Meanings, Strokes, JLPT, Examples.
+- ＋ Anki button in word and kanji popups; ★ marker for words already in Anki (checked with `findNotes`).
+- If Anki isn't running, notes go into a local **queue** and are sent automatically next time Anki is reachable.
+- Settings: deck name, which card types to create, include screenshot / audio, default tag.
+- Phone review works through AnkiWeb sync (AnkiDroid / AnkiMobile).
+
+### 3.5 Audio (optional)
+- Japanese text-to-speech using Windows voices (offline). Needs a Japanese voice installed in Windows.
+- ▶ buttons for word and sentence. If the Anki module is enabled, audio can be attached to notes.
+
+## 4. Module system
+
+### 4.1 Module package
+Each module is a folder with a manifest:
+
+```toml
+# module.toml
+id = "anki"
+name = "Anki"
+version = "1.0.0"
+description = "Save words and kanji to Anki through AnkiConnect."
+core_api = ">=1.0,<2.0"        # compatible core API versions
+entry_point = "jisho_lens_anki:Module"
+dependencies = []               # extra Python packages, if any
+default_enabled = false
+```
+
+### 4.2 Extension points
+A module's `Module` class receives a `ModuleContext` and registers what it adds:
+
+- **Popup actions** — buttons in the word / kanji popup (＋ Anki, ▶).
+- **Window actions** — buttons on the main window (Translate).
+- **Settings pages.**
+- **Tray menu items.**
+- **Events** — `capture_completed`, `text_analyzed`, `word_opened`, `kanji_opened`, `translation_completed`.
+- **Services** — named providers other parts can call: `dictionary`, `translation`, `tts`.
+
+The core never imports a module directly; it only talks through these points. A disabled module isn't imported at all.
+
+### 4.3 Installing after installation
+- The app ships with its **own Python runtime** (not a frozen single exe), so new modules and their Python dependencies can be added later.
+- Installed modules live in `%LOCALAPPDATA%\mc-jisho-lens\modules\<id>\`, each with its own `site-packages` folder for dependencies.
+- Modules are downloaded only from the project's official release source, and each download is checked against a published SHA-256 checksum before installing.
+- The installer can also install optional modules (checkboxes, unchecked by default) using the same mechanism.
+- Exactly how the runtime is bundled is decided in Phase 0 (see the plan).
+
+## 5. Data and storage
+
+| What | Where | Format |
+|---|---|---|
+| Settings | `%APPDATA%\mc-jisho-lens\settings.toml` | TOML |
+| DeepL key | Windows Credential Manager | — |
+| History + capture images | `%LOCALAPPDATA%\mc-jisho-lens\history.db` + `captures\` | SQLite + PNG |
+| Dictionary | Inside the Dictionary module folder | SQLite (read-only) |
+| Installed modules | `%LOCALAPPDATA%\mc-jisho-lens\modules\` | Folders |
+| Anki queue | Inside the Anki module's data folder | SQLite |
+| Logs | `%LOCALAPPDATA%\mc-jisho-lens\logs\` | Text, rotating |
+
+`history.db` table `captures`: `id`, `created_at`, `image_path`, `ocr_text`, `edited_text`, `translation`, `ocr_engine`, `source_tag`.
+
+## 6. Tech stack
+
+| Area | Choice |
+|---|---|
+| Language | Python 3.12 |
+| Packaging / env | `uv` for development; bundled Python runtime for release |
+| UI | PySide6 (Qt 6) + Qt WebEngine + WebChannel |
+| Screenshots | `mss` |
+| Win32 calls | `ctypes` (hotkey, DPI awareness, capture exclusion) |
+| OCR | `rapidocr` + `onnxruntime`; `winrt` packages for Windows OCR |
+| Image processing | Pillow / OpenCV (headless) |
+| Analysis | `fugashi` + UniDic, `cutlet` |
+| Dictionary | JMdict + KANJIDIC2 → SQLite (build script in repo) |
+| Translation | DeepL API (`deepl` package) |
+| Secrets | `keyring` |
+| Anki | AnkiConnect over HTTP (`httpx`) |
+| TTS | Windows speech (`winrt` Windows.Media.SpeechSynthesis) |
+| Tests / lint | `pytest`, `ruff` |
+| Installer | Inno Setup (decided in Phase 0) |
+
+## 7. Resource targets
+- Target hardware: RTX 4060 8 GB, 16 GB RAM. Must also run on CPU-only machines.
+- Idle in tray: < 150 MB RAM, ~0% CPU.
+- Capture → text shown: < 1 s on CPU for a typical dialogue box.
+- GPU memory: < 1 GB, and only if GPU OCR is turned on.
+
+## 8. Online / offline
+
+| Feature | Network |
+|---|---|
+| Capture, OCR, analysis, dictionary, history, audio | Offline |
+| Anki | Local only (127.0.0.1) |
+| Translation | **Online** (DeepL) |
+| Module install / update | Online when installing |
+
+## 9. Licences and attribution
+- **JMdict, KANJIDIC2** — EDRDG licence (CC BY-SA 4.0). Attribution in the About screen; the derived database stays under the same licence.
+- **UniDic** — BSD / LGPL / GPL (choose BSD).
+- **MeCab, fugashi, cutlet, RapidOCR, PaddleOCR models, ONNX Runtime** — permissive licences; to be listed in a third-party notices file.
+- **PySide6** — LGPL; must be dynamically linked (the default) and the licence included.
+
+## 10. Risks
+| Risk | Mitigation |
+|---|---|
+| OCR accuracy on stylized game fonts and busy backgrounds | Phase 0 test on real games; preprocessing options; two engines; editable text |
+| DPI scaling / multi-monitor coordinate bugs | Per-monitor DPI v2 from day one; test at 100/125/150% and mixed setups |
+| Installing modules after install with a bundled Python | Packaging spike in Phase 0 before building the module system on top |
+| Exclusive fullscreen games | Document borderless windowed; nothing else planned |
+| UniDic reading wrong for names / rare words | Show alternative readings from JMdict in the popup; text is editable |
+| Install size (Qt WebEngine + UniDic + dictionary) | Measure in Phase 0; consider `unidic-lite` vs full UniDic |
+
+## 11. Open questions
+- Full UniDic (~1 GB, more accurate) or `unidic-lite` (~50 MB, older)? Decide after Phase 0 measurements.
+- Default hotkey: is `Ctrl+Alt+J` free in your games?
+- Where module releases are hosted (e.g. GitHub Releases on the project repo).
