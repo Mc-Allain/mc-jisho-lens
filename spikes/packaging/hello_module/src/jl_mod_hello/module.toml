@@ -1,0 +1,8 @@
+id = "hello"
+name = "Hello"
+version = "1.0.0"
+description = "Dummy module for the packaging test."
+core_api = ">=1.0,<2.0"
+entry_point = "jl_mod_hello:Module"
+dependencies = ["humanize>=4.9"]
+default_enabled = false

@@ -1,0 +1,14 @@
+[project]
+name = "jl-mod-hello"
+version = "1.0.0"
+description = "Dummy Jisho Lens module for the packaging test"
+requires-python = ">=3.12"
+# A real third-party dependency, to prove dependencies install after setup too.
+dependencies = ["humanize>=4.9"]
+
+[build-system]
+requires = ["uv_build>=0.13.9,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "jl_mod_hello"

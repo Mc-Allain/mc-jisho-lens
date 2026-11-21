@@ -1,2 +1,16 @@
 # Reference frames captured from a third-party gameplay video (local research only)
 video-frames/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Phase 0 local outputs
+tests/ocr_set/images/
+tools/out/
+spikes/packaging/out/
