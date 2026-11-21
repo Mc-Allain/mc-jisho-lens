@@ -50,7 +50,7 @@ Goal: answer the risky questions before building on them.
   - Snow-area HUD (white on white) (≈2)
 - [ ] **OCR test:** run RapidOCR and Windows OCR on the set, each with no preprocessing, upscale only, and upscale + contrast / white-text isolation + auto polarity. Compare character accuracy per category and speed. Pick the default engine and default preprocessing preset.
 - [ ] Set a target: e.g. ≥ 95% character accuracy on dialogue and menus with the default preset (combat HUD excluded).
-- [ ] **Capture test:** screenshot + region select on each monitor at 100/125/150% scaling; confirm the pixels match.
+- [ ] **Capture test:** display detection (monitors, resolution, scaling) built into the app; screenshot + region select confirmed on the dev machine (one 1920×1080 display at 100%). Other scalings (125/150%) and multi-monitor are tested by temporarily changing Windows display scaling, since the dev machine has a single display.
 - [ ] **Packaging test:** bundle the app with its own Python runtime, install it, then install a dummy module (with one pip dependency) *after* installation. Confirm it loads. Pick the installer tool.
 - [ ] **Size check:** installed size with Qt WebEngine and UniDic full vs lite.
 

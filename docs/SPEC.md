@@ -68,6 +68,7 @@ Also seen: HUD quest tracker and prompts (small, semi-transparent), tutorial tex
 **Capture**
 - Take a screenshot of the full virtual desktop (all monitors) first, then show it frozen and dimmed in a borderless fullscreen overlay for selection. This avoids timing issues with moving content.
 - Per-monitor DPI awareness (v2) so the selection matches pixels at 100/125/150% scaling and on mixed-DPI setups.
+- The app **detects monitors, resolutions and scaling itself** at startup and whenever the display setup changes (Win32 `EnumDisplayMonitors` + `GetDpiForMonitor`). Nothing needs configuring. The detected setup is shown in Settings → About and written to the log, to help with bug reports.
 - The main window is excluded from capture (`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`).
 - Limitation: can't draw over **exclusive fullscreen** games; borderless windowed mode works.
 
@@ -224,7 +225,7 @@ The core never imports a module directly; it only talks through these points. A 
 | Installer | Inno Setup (decided in Phase 0) |
 
 ## 7. Resource targets
-- Target hardware: RTX 4060 8 GB, 16 GB RAM. Must also run on CPU-only machines.
+- Target hardware (detected on the dev machine): laptop with RTX 4050 Laptop GPU (6 GB) + Intel UHD integrated graphics, 16 GB RAM, one 1920×1080 display at 100%. Must also run on CPU-only machines.
 - Idle in tray: < 150 MB RAM, ~0% CPU.
 - Capture → text shown: < 1 s on CPU for a typical dialogue box.
 - GPU memory: < 1 GB, and only if GPU OCR is turned on.
