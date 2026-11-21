@@ -7,6 +7,11 @@ from jisho_lens.core.analysis.kana import has_kanji, is_kanji, to_hiragana
 
 @pytest.fixture(scope="module")
 def an():
+    from jisho_lens.core.analysis import available_modes
+
+    if available_modes()["lite"] is not None:
+        pytest.skip("UniDic-lite component not installed (tools/components.py install "
+                    "unidic-lite)")
     return Analyzer()
 
 
@@ -86,7 +91,7 @@ def test_unknown_names_and_numbers(an):
 
 
 def test_split_katakana_names_are_rejoined(an):
-    for name in ["テララ", "リリカ"]:
+    for name in ["テララ", "リリカ", "ミィティ"]:
         toks = an.analyze_line(f"{name}は困っているようだ。")
         assert toks[0].surface == name, [t.surface for t in toks]
         assert toks[0].reading == to_hiragana(name)
