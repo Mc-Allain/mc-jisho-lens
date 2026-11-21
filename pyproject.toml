@@ -24,7 +24,8 @@ dependencies = [
     "fugashi>=1.3",
     "cutlet>=0.4",
     "tomli-w>=1.2.0",
-    "unidic>=1.1",
+    # installs optional components (UniDic) into their own folders: pip install --target
+    "pip>=24",
 ]
 
 [project.scripts]
@@ -35,6 +36,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+
 
 [build-system]
 requires = ["uv_build>=0.13.9,<0.14.0"]
