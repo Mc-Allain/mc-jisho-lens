@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from PIL import Image
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from jisho_lens.core.analysis import Token, shared_analyzer
 from jisho_lens.core.ocr import create_engine
 from jisho_lens.core.ocr.base import OcrResult
 from jisho_lens.core.ocr.cleanup import CleanText, clean
@@ -36,7 +37,8 @@ class OcrOutcome:
     job: OcrJob
     raw: OcrResult
     cleaned: CleanText
-    seconds: float  # preprocessing + recognition
+    tokens: list[list[Token]]  # one list of words per line of cleaned text
+    seconds: float  # preprocessing + recognition + analysis
 
 
 class _Worker(QObject):
@@ -60,6 +62,11 @@ class _Worker(QObject):
     def preload(self, name: str) -> None:
         t0 = time.perf_counter()
         try:
+            shared_analyzer()  # load the word splitter too
+        except Exception as exc:  # noqa: BLE001
+            log.exception("loading the word splitter failed")
+            self.engine_failed.emit("dictionary", str(exc))
+        try:
             self._engine(name)
             self.engine_ready.emit(name, time.perf_counter() - t0)
         except Exception as exc:  # noqa: BLE001
@@ -74,10 +81,11 @@ class _Worker(QObject):
             prepared = apply(job.image, job.preset)
             raw = engine.recognize(prepared)
             cleaned = clean(raw.lines, job.remove_key_icons, job.detect_speaker)
+            tokens = shared_analyzer().analyze(cleaned.lines)
             seconds = time.perf_counter() - t0
             log.info("OCR job %d: %s/%s %.2fs, %d lines", job.job_id, job.engine, job.preset,
                      seconds, len(raw.lines))
-            self.finished.emit(OcrOutcome(job, raw, cleaned, seconds))
+            self.finished.emit(OcrOutcome(job, raw, cleaned, tokens, seconds))
         except Exception as exc:  # noqa: BLE001
             log.exception("OCR job %d failed", job.job_id)
             self.failed.emit(job.job_id, str(exc))

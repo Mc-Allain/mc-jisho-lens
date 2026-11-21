@@ -215,7 +215,7 @@ The core never imports a module directly; it only talks through these points. A 
 | Win32 calls | `ctypes` (hotkey, DPI awareness, capture exclusion) |
 | OCR | `rapidocr` + `onnxruntime`; `winrt` packages for Windows OCR |
 | Image processing | Pillow / OpenCV (headless) |
-| Analysis | `fugashi` + UniDic, `cutlet` |
+| Analysis | `fugashi` + full UniDic 3.1 (`unidic` package), `cutlet` |
 | Dictionary | JMdict + KANJIDIC2 → SQLite (build script in repo) |
 | Translation | DeepL API (`deepl` package) |
 | Secrets | `keyring` |
@@ -254,10 +254,11 @@ The core never imports a module directly; it only talks through these points. A 
 | Installing modules after install with a bundled Python | Packaging spike in Phase 0 before building the module system on top |
 | Exclusive fullscreen games | Document borderless windowed; nothing else planned |
 | UniDic reading wrong for names / rare words | Show alternative readings from JMdict in the popup; text is editable |
-| Install size (Qt WebEngine + UniDic + dictionary) | Measure in Phase 0; consider `unidic-lite` vs full UniDic |
+| Install size (Qt WebEngine + full UniDic + dictionary) | Full UniDic chosen (decision 2026-11-21); trim Qt modules; the installer must include or download the UniDic data (~526 MB download) |
 
 ## 11. Open questions
-- Full UniDic (~1 GB, more accurate) or `unidic-lite` (~50 MB, older)? Decide after Phase 0 measurements.
+- ~~Full UniDic or `unidic-lite`?~~ Decided 2026-11-21: **full UniDic 3.1**; `unidic-lite` removed.
+- Installer: ship the UniDic data inside the installer, or download it on first run?
 - Default hotkey: is `Ctrl+Alt+J` free in your games?
 - Where module releases are hosted (e.g. GitHub Releases on the project repo).
 - User glossary for game terms: core feature or part of the Dictionary module? (Not in v1.)

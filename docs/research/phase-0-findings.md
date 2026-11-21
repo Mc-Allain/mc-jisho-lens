@@ -96,7 +96,7 @@ Installed sizes (site-packages, MB):
 - Trimming unused Qt modules, translations and QML could save roughly 200–300 MB; shipping only one OCR model set saves up to ~85 MB.
 - **Full UniDic** (3.1.0) is a **526 MB download** (~770 MB installed), so it would roughly add 0.5 GB over `unidic-lite`. Not downloaded here.
 
-Recommendation: keep **unidic-lite** for now; compare reading accuracy of lite vs full on real game lines in Phase 2 and switch only if lite gets readings wrong often.
+Recommendation at the time: keep **unidic-lite** for now. **Update (Phase 2): switched to full UniDic 3.1 at the user's request; 775 MB installed. See PLAN Phase 2 notes for the comparison.**
 
 ## 6. Still open
 

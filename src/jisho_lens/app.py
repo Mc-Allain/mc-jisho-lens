@@ -16,6 +16,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from jisho_lens import __version__
+from jisho_lens.core.analysis import shared_analyzer
 from jisho_lens.core.capture import Rect, grab_desktop, grab_rect
 from jisho_lens.core.displays import describe_displays, enable_per_monitor_dpi_awareness
 from jisho_lens.core.hotkey import HotkeyManager
@@ -87,8 +88,11 @@ class JishoLens:
     @property
     def window(self) -> MainWindow:
         if self._window is None:
-            w = MainWindow(self.settings.window.font_size)
+            ws = self.settings.window
+            w = MainWindow(ws.font_size, ws.show_furigana, ws.show_romaji)
             w.setWindowIcon(app_icon())
+            w.text_edited.connect(self._on_text_edited)
+            w.display_changed.connect(self._on_display_changed)
             w.restore_geometry(self.settings.window.geometry)
             w.set_engine_preset(self.settings.ocr.engine, self.settings.ocr.preset)
             w.recapture_requested.connect(self.start_capture)
@@ -185,7 +189,17 @@ class JishoLens:
             return  # an older job finished after a newer one was started
         self.tray.setIcon(app_icon())
         status = f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
-        self.window.show_text(outcome.cleaned.lines, outcome.cleaned.speaker, status)
+        self.window.show_text(outcome.cleaned.lines, outcome.tokens, outcome.cleaned.speaker,
+                              status)
+
+    def _on_text_edited(self, lines: list[str]) -> None:
+        tokens = shared_analyzer().analyze(lines)
+        self.window.show_text(lines, tokens, self.window._speaker, "Edited")
+
+    def _on_display_changed(self, furigana: bool, romaji: bool) -> None:
+        self.settings.window.show_furigana = furigana
+        self.settings.window.show_romaji = romaji
+        self.settings.save()
 
     def _on_ocr_failed(self, job_id: int, message: str) -> None:
         if job_id != self._pending_job:
@@ -194,8 +208,8 @@ class JishoLens:
         self.window.show_message(f"OCR failed: {message}", error=True)
 
     def _on_engine_failed(self, name: str, message: str) -> None:
-        self.tray.showMessage("Jisho Lens", f"OCR engine {name} unavailable: {message}",
-                              app_icon(), 6000)
+        what = "Word splitter" if name == "dictionary" else f"OCR engine {name}"
+        self.tray.showMessage("Jisho Lens", f"{what} unavailable: {message}", app_icon(), 8000)
 
     # ---------- settings ----------
     def open_settings(self) -> None:
@@ -212,6 +226,8 @@ class JishoLens:
     def _apply_settings(self, new: Settings) -> None:
         old = self.settings
         new.window.geometry = old.window.geometry
+        new.window.show_furigana = old.window.show_furigana
+        new.window.show_romaji = old.window.show_romaji
         self.settings = new
         if new.capture.hotkey != old.capture.hotkey or not self.hotkey_ok:
             self.hotkey_ok, message = self.hotkeys.register(new.capture.hotkey)

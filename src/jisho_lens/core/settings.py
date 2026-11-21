@@ -34,6 +34,8 @@ class WindowSettings:
     # x, y, width, height in Qt logical pixels; empty = place automatically
     geometry: list[int] = field(default_factory=list)
     font_size: int = 22
+    show_furigana: bool = True
+    show_romaji: bool = False
 
 
 @dataclass

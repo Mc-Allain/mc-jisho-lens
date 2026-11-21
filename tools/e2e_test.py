@@ -69,10 +69,37 @@ def main() -> int:
                            QPoint(X + w + 4, Y + h + 4))
         result["selected"] = time.perf_counter()
 
+    out_dir = ROOT / "tools" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     def on_done(outcome) -> None:
         result["outcome"] = outcome
         result["t1"] = time.perf_counter()
-        QTimer.singleShot(800, check_exclusion)
+        QTimer.singleShot(1500, click_word)
+
+    def click_word() -> None:
+        lens.window.grab().save(str(out_dir / "e2e-1-text.png"))
+        js = ("(() => { const ws = document.querySelectorAll('.w'); if (!ws.length) return '';"
+              " const w = ws[Math.min(3, ws.length - 1)]; w.click();"
+              " return document.getElementById('pop').innerText; })()")
+        lens.window.view.page().runJavaScript(js, 0, on_popup)
+
+    def on_popup(text) -> None:
+        result["popup"] = text
+        QTimer.singleShot(400, toggle_romaji)
+
+    def toggle_romaji() -> None:
+        lens.window.grab().save(str(out_dir / "e2e-2-popup.png"))
+        lens.window.romaji_btn.setChecked(True)
+        QTimer.singleShot(400, after_romaji)
+
+    def after_romaji() -> None:
+        lens.window.view.page().runJavaScript("document.body.innerText", 0, on_romaji_text)
+
+    def on_romaji_text(text) -> None:
+        result["romaji_text"] = text
+        lens.window.grab().save(str(out_dir / "e2e-3-romaji.png"))
+        QTimer.singleShot(300, check_exclusion)
 
     def check_exclusion() -> None:
         g = lens.window.frameGeometry()
@@ -102,6 +129,10 @@ def main() -> int:
         full = "\n".join(([outcome.cleaned.speaker] if outcome.cleaned.speaker else [])
                          + outcome.cleaned.lines)
         print(f"Accuracy vs truth: {char_accuracy(full, truth):.1%}")
+    print("Popup   :", (result.get("popup") or "(none)").replace("\n", " | "))
+    rt = (result.get("romaji_text") or "").splitlines()
+    print("Romaji  :", " / ".join(x for x in rt if x.isascii() and x.strip())[:200] or "(none)")
+    print(f"Pictures: {out_dir / 'e2e-1-text.png'} (+ -2-popup, -3-romaji)")
     same = result.get("window_in_screenshot", 1.0)
     print(f"Main window pixels found in a screenshot: {same:.0%} "
           f"({'hidden from capture OK' if same < 0.5 else 'NOT hidden'})")

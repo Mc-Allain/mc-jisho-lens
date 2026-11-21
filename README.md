@@ -2,7 +2,7 @@
 
 **Jisho Lens** — a Windows tool for reading Japanese text in games. Press a hotkey, select text on screen, and click any word to see its reading, romaji and meanings. Translate to English with DeepL when you want to.
 
-Status: Phase 1 (capture → OCR → text window). Furigana, romaji and word lookups come in Phase 2.
+Status: Phase 2 (capture → OCR → text with furigana, romaji and clickable words). Dictionary meanings come in Phase 3, DeepL translation in Phase 5.
 
 - [Specification](docs/SPEC.md)
 - [Build plan](docs/PLAN.md)
@@ -13,6 +13,7 @@ Requires Windows 10/11 and [uv](https://docs.astral.sh/uv/). If `uv` isn't on yo
 
 ```powershell
 uv sync
+uv run python -m unidic download   # once: full UniDic dictionary, ~526 MB download
 uv run jisho-lens
 ```
 
@@ -22,7 +23,7 @@ The app starts in the system tray (字 icon). Then:
 2. Drag a rectangle around Japanese text. Esc or right-click cancels.
 3. The text appears in an always-on-top window after about 1–2 seconds.
 
-In the window: **Re-capture**, **Edit** (fix OCR mistakes), **Copy**, and **Retry** with another OCR engine or image preset. Closing the window only hides it; quit from the tray icon's menu. Left-clicking the tray icon shows or hides the window.
+In the window: **click any word** to see its reading in that sentence, romaji, word type and dictionary form. **Furigana** and **Romaji** buttons switch the readings above the kanji and the romaji line on or off. **Re-capture**, **Edit** (fix OCR mistakes; the words are re-analysed), **Copy**, and **Retry** with another OCR engine or image preset. Closing the window only hides it; quit from the tray icon's menu. Left-clicking the tray icon shows or hides the window.
 
 Tips: games must run in **borderless windowed** mode (the app can't draw over exclusive fullscreen). Wait until a dialogue line has fully appeared before capturing, or set a capture delay in Settings.
 

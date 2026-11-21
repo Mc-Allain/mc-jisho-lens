@@ -1,12 +1,10 @@
 """Always-on-top window showing the captured Japanese text (SPEC §3.1 Main window).
 
-Phase 1: plain text. Phase 2 turns the text into clickable words with furigana and romaji;
-the text is already rendered as HTML in a web view for that reason.
+Phase 2: words are clickable (popup with reading, romaji, word type, dictionary form),
+furigana sits over kanji, and a romaji line can be shown under each line.
 """
 
 from __future__ import annotations
-
-import html
 
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QGuiApplication
@@ -22,36 +20,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from jisho_lens.core.analysis import Token
 from jisho_lens.core.ocr import ENGINE_NAMES
 from jisho_lens.core.ocr.preprocess import PRESETS
+from jisho_lens.ui.render import page_for_message, page_for_tokens
 from jisho_lens.ui.winapi import exclude_from_capture
-
-_CSS = """
-html, body { margin: 0; padding: 0; background: #1d1f24; color: #f1f1f1;
-  font-family: "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif; }
-body { padding: 10px 14px; font-size: %(size)dpx; line-height: 1.6; }
-p { margin: 0 0 4px 0; }
-.empty { color: #8a8f99; font-size: 15px; }
-.error { color: #ff8a80; font-size: 15px; }
-"""
-
-
-def _page(body: str, font_size: int) -> str:
-    return (
-        "<!doctype html><html lang='ja'><head><meta charset='utf-8'><style>"
-        + _CSS % {"size": font_size}
-        + "</style></head><body>" + body + "</body></html>"
-    )
 
 
 class MainWindow(QWidget):
     recapture_requested = Signal()
     retry_requested = Signal(str, str)  # engine, preset
     settings_requested = Signal()
-    text_edited = Signal(str)
+    text_edited = Signal(list)  # new lines
     geometry_changed = Signal(list)
+    display_changed = Signal(bool, bool)  # furigana, romaji
 
-    def __init__(self, font_size: int = 22) -> None:
+    def __init__(self, font_size: int = 22, furigana: bool = True, romaji: bool = False) -> None:
         super().__init__(
             None,
             Qt.WindowType.Window
@@ -60,19 +44,29 @@ class MainWindow(QWidget):
         )
         self.setWindowTitle("Jisho Lens")
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.setMinimumSize(360, 160)
+        self.setMinimumSize(380, 170)
         self._font_size = font_size
+        self._tokens: list[list[Token]] = []
         self._lines: list[str] = []
         self._speaker: str | None = None
+        self._message: tuple[str, bool] | None = None
 
         self.speaker_label = QLabel()
         self.speaker_label.setStyleSheet("color: #a9cfff; font-weight: bold; font-size: 15px;")
+        self.furigana_btn = QPushButton("Furigana")
+        self.romaji_btn = QPushButton("Romaji")
+        for b, on in ((self.furigana_btn, furigana), (self.romaji_btn, romaji)):
+            b.setCheckable(True)
+            b.setChecked(on)
+            b.toggled.connect(self._display_toggled)
         self.status_label = QLabel()
         self.status_label.setStyleSheet("color: #8a8f99; font-size: 12px;")
         top = QHBoxLayout()
         top.addWidget(self.speaker_label)
         top.addStretch(1)
         top.addWidget(self.status_label)
+        top.addWidget(self.furigana_btn)
+        top.addWidget(self.romaji_btn)
 
         self.view = QWebEngineView()
         self.view.page().setBackgroundColor(Qt.GlobalColor.transparent)
@@ -107,8 +101,11 @@ class MainWindow(QWidget):
         layout.addLayout(top)
         layout.addWidget(self.stack, 1)
         layout.addLayout(bottom)
-        self.setStyleSheet("QWidget { background: #25272d; color: #e6e6e6; }"
-                           "QPushButton, QComboBox { padding: 3px 8px; }")
+        self.setStyleSheet(
+            "QWidget { background: #25272d; color: #e6e6e6; }"
+            "QPushButton, QComboBox { padding: 3px 8px; }"
+            "QPushButton:checked { background: #3d5a8a; }"
+        )
 
         self.recapture_btn.clicked.connect(self.recapture_requested)
         self.edit_btn.clicked.connect(self._toggle_edit)
@@ -138,16 +135,19 @@ class MainWindow(QWidget):
         self._set_buttons_enabled(False)
 
     def show_message(self, message: str, error: bool = False) -> None:
-        self._lines, self._speaker = [], None
+        self._tokens, self._lines, self._speaker = [], [], None
+        self._message = (message, error)
         self.speaker_label.setText("")
-        cls = "error" if error else "empty"
-        self.view.setHtml(_page(f"<p class='{cls}'>{html.escape(message)}</p>", self._font_size))
+        self._render()
         self._set_buttons_enabled(True)
 
-    def show_text(self, lines: list[str], speaker: str | None, status: str) -> None:
-        self._lines, self._speaker = list(lines), speaker
+    def show_text(self, lines: list[str], tokens: list[list[Token]], speaker: str | None,
+                  status: str | None = None) -> None:
+        self._lines, self._tokens, self._speaker = list(lines), tokens, speaker
+        self._message = None
         self.speaker_label.setText(speaker or "")
-        self.status_label.setText(status)
+        if status is not None:
+            self.status_label.setText(status)
         self._leave_edit_mode(save=False)
         self._render()
         self._set_buttons_enabled(True)
@@ -156,12 +156,23 @@ class MainWindow(QWidget):
         return "\n".join(self._lines)
 
     def _render(self) -> None:
-        if not self._lines:
-            self.view.setHtml(_page("<p class='empty'>No Japanese text found. Try Retry with "
-                                    "another engine or preset, or Edit.</p>", self._font_size))
-            return
-        body = "".join(f"<p>{html.escape(line)}</p>" for line in self._lines)
-        self.view.setHtml(_page(body, self._font_size))
+        if self._message is not None:
+            message, error = self._message
+            html = page_for_message(message, self._font_size, error=error)
+        elif not self._lines:
+            html = page_for_message("No Japanese text found. Try Retry with another engine or "
+                                    "preset, or Edit.", self._font_size)
+        else:
+            html = page_for_tokens(self._tokens, self._font_size,
+                                   self.furigana_btn.isChecked(), self.romaji_btn.isChecked())
+        self.view.setHtml(html)
+
+    def _display_toggled(self) -> None:
+        furi, rom = self.furigana_btn.isChecked(), self.romaji_btn.isChecked()
+        # update in place (keeps an open popup); no full re-render needed
+        self.view.page().runJavaScript(
+            f"setOpt('furi', {str(furi).lower()}); setOpt('romaji', {str(rom).lower()});")
+        self.display_changed.emit(furi, rom)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.retry_btn):
@@ -181,14 +192,13 @@ class MainWindow(QWidget):
     def _leave_edit_mode(self, save: bool) -> None:
         if self.stack.currentWidget() is not self.editor:
             return
-        if save:
-            new_lines = [ln for ln in self.editor.toPlainText().splitlines() if ln.strip()]
-            if new_lines != self._lines:
-                self._lines = new_lines
-                self.text_edited.emit(self.text())
-            self._render()
         self.stack.setCurrentWidget(self.view)
         self.edit_btn.setText("Edit")
+        if save:
+            new_lines = [ln.strip() for ln in self.editor.toPlainText().splitlines()
+                         if ln.strip()]
+            if new_lines != self._lines:
+                self.text_edited.emit(new_lines)  # the app re-analyzes and calls show_text
 
     def _copy(self) -> None:
         QGuiApplication.clipboard().setText(self.text())
@@ -213,8 +223,8 @@ class MainWindow(QWidget):
                 self.setGeometry(rect)
                 return
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        self.resize(640, 220)
-        self.move(screen.right() - 660, screen.bottom() - 260)
+        self.resize(680, 260)
+        self.move(screen.right() - 700, screen.bottom() - 300)
 
     def moveEvent(self, event) -> None:  # noqa: N802
         super().moveEvent(event)

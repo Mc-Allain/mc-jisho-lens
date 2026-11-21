@@ -77,34 +77,48 @@ Phase 1 notes (2026-11-21):
 - Preprocessing presets exist but none beats `none` yet (see phase-0-findings.md); default stays `none` until real screenshots are tested.
 
 ## Phase 2 — Text analysis and display
-- [ ] fugashi + UniDic tokenizer wrapper with a clean token model.
-- [ ] Furigana alignment (kanji part only), romaji via cutlet, particle pronunciation.
-- [ ] WebEngine view: tokens as clickable spans, `<ruby>` furigana, romaji line.
-- [ ] Furigana / romaji toggles; basic word popup showing reading + romaji only.
-- [ ] Numbers, counters and symbols (7/20, 418%, +53, ×1, 【】, ——, ……, （火）) pass through as non-clickable tokens.
-- [ ] Unit tests for furigana alignment and romaji on tricky cases (今日, 食べられなかった, は/を/へ, long vowels, っ), plus real lines from the UI scan.
+- [x] fugashi + UniDic tokenizer wrapper with a clean token model.
+- [x] Furigana alignment (kanji part only), romaji via cutlet, particle pronunciation.
+- [x] WebEngine view: tokens as clickable spans, `<ruby>` furigana, romaji line.
+- [x] Furigana / romaji toggles; basic word popup showing reading + romaji only.
+- [x] Numbers, counters and symbols (7/20, 418%, +53, ×1, 【】, ——, ……, （火）) pass through as non-clickable tokens.
+- [x] Unit tests for furigana alignment and romaji on tricky cases (今日, 食べられなかった, は/を/へ, long vowels, っ), plus real lines from the UI scan.
 
 Done when: clicking a word shows its reading in context.
 
-## Phase 3 — Module system
-- [ ] Manifest format, loader, `ModuleContext`, extension points, events, services.
-- [ ] Enable / disable with restart-free reload where possible.
-- [ ] Module Manager UI (list, enable, disable) — install/uninstall comes in Phase 7.
-- [ ] A test module to prove each extension point.
+Phase 2 notes (2026-11-21):
+- Analysis runs in the OCR worker right after OCR (a few ms), and again on the GUI thread after Edit.
+- Romaji follows the kana (スター → "sutaa", not "star") and uses Hepburn particles (は → wa, へ → e, を → o). cutlet's mapping was patched for ウィ/ウェ/ウォ/クァ/イェ ("wisupaa", not "isupaa").
+- Popup shows: word with furigana, reading, romaji, word type, dictionary form (with reading), raw conjugation type/form, particle pronunciation note, and a "not in the word list" note for unknown words (names, game terms). Dictionary meanings and a readable conjugation breakdown come with the Dictionary (Phase 3).
+- UniDic-lite weak spots seen on real game lines: rare compounds split wrongly (火元素 → 火元 + 素, まえにじっちゃ → まえ + にじっ + ちゃ) and coined game words get ordinary readings (炎核 → ほのお + かく, 翼人 → つばさ + にん).
+- **Switched to full UniDic 3.1 (decision 2026-11-21); unidic-lite removed.** Retest on the same lines: none of the problems above changed (翼人 is now つばさ + ひと), and full UniDic splits unknown katakana names (テララ → テ + ララ, リリカ → リリ + カ). Fixed for both dictionaries: a run of katakana pieces containing a one-character piece or a grammar word is joined back into one "unknown word" (real compounds like スター + リンク stay split). Cost: +526 MB on disk (775 MB vs 249 MB); RAM +~14 MB (dictionary is read from disk on demand); load 0.26 s; analysis ~0.2 ms per line. Setup now needs `python -m unidic download` once.
+- Edit remains the way to fix individual wrong splits; a user glossary for game terms (SPEC open question) would fix them permanently.
+- Checked end to end with `tools/e2e_test.py` (furigana, popup, romaji toggle; window pictures saved in `tools/out/`).
 
-Done when: modules can add popup buttons, window buttons, settings pages and services without the core knowing about them.
+## Phase 3 — Dictionary
+Built first, as ordinary core code behind a small `dictionary` service interface, so meanings reach the popup early. Phase 7 turns it into a module.
 
-## Phase 4 — Dictionary module
 - [ ] `tools/build_dictionary.py`: JMdict + KANJIDIC2 → SQLite with indexes for kanji form, kana form, and kanji character.
 - [ ] Lookup by lemma + reading, ranked by reading match and commonness.
 - [ ] Word popup: meanings by part of speech, conjugation breakdown, particle notes, loanword source, common/JLPT markers.
 - [ ] Kanji popup: on/kun readings (current one highlighted), meanings, strokes, grade, JLPT, example words.
 - [ ] "Not in dictionary" state for game terms and names: reading + romaji + per-kanji breakdown.
+- [ ] **Word-boundary check using JMdict** (idea from 2026-11-21 review): take MeCab's top alternative splits (`nbestToNodeList`) and move a boundary character to the next word only when (a) that creates a *common* JMdict word, (b) the word it leaves is *not* common, and (c) the leftover piece is still a dictionary word. Fixes 火元 + 素 → 火 + 元素 without breaking 攻撃 + 力, 日本 + 人, 大陸 + 中. A naive version without JMdict was tested and rejected: it fixed 火元素 but broke 攻撃力 → 攻 + 撃力, 日本人 → 日 + 本人, 大陸中 → 大 + 陸中.
+- [ ] **Compound readings for coined words**: when a run of single-kanji tokens isn't a JMdict word (炎 + 核, 翼 + 人), offer the on'yomi reading from KANJIDIC2 in the popup as an alternative (えんかく, よくじん) and mark it as a guess.
+- [ ] Re-evaluate UniDic-lite vs full UniDic once the JMdict checks are in place (suggestion on 2026-11-21: JMdict covers lite's gaps, saving 526 MB). Compare on real game lines.
 - [ ] Attribution in an About screen.
 
 Done when: word and kanji popups are complete and work offline.
 
-## Phase 5 — Translation module (DeepL)
+## Phase 4 — History
+- [ ] `history.db` + saved capture images.
+- [ ] History screen: list with thumbnails, open in main window, delete, retention setting.
+
+Done when: past captures can be browsed and reopened.
+
+## Phase 5 — Translation (DeepL)
+Built as ordinary code, like the Dictionary; Phase 7 turns it into a module.
+
 - [ ] Translation provider interface (core service).
 - [ ] DeepL provider; Free/Pro detection; key in Credential Manager.
 - [ ] First-launch key prompt (skippable); "Add a DeepL key" state on the button.
@@ -112,20 +126,9 @@ Done when: word and kanji popups are complete and work offline.
 
 Done when: Translate shows English, and the app works fine without a key.
 
-## Phase 6 — History
-- [ ] `history.db` + saved capture images.
-- [ ] History screen: list with thumbnails, open in main window, delete, retention setting.
+## Phase 6 — Anki
+The first optional feature. Built as ordinary code with an on/off switch in Settings (off by default) until the module system exists in Phase 7.
 
-Done when: past captures can be browsed and reopened.
-
-## Phase 7 — Installing modules after installation
-- [ ] Module index (list of available modules, versions, download URLs, SHA-256).
-- [ ] Download, verify checksum, install dependencies into the module's own folder, enable.
-- [ ] Update and uninstall.
-
-Done when: a module can be installed, updated and removed from the Module Manager.
-
-## Phase 8 — Anki module
 - [ ] AnkiConnect client; connection check and helpful "Anki isn't running / add-on missing" messages.
 - [ ] Create note types (Word: Reading + Meaning cards; Kanji) and deck on first use.
 - [ ] ＋ Anki in word and kanji popups; ★ already-saved markers.
@@ -134,7 +137,27 @@ Done when: a module can be installed, updated and removed from the Module Manage
 
 Done when: one click puts a full card into Anki, and it syncs to the phone.
 
+## Phase 7 — Module system
+Built once the first optional feature (Anki) exists, so it is designed around real modules.
+
+- [ ] Manifest format, loader, `ModuleContext`, extension points, events, services.
+- [ ] Enable / disable with restart-free reload where possible.
+- [ ] Module Manager UI (list, enable, disable) — install/uninstall comes in Phase 8.
+- [ ] Turn Dictionary (Phase 3), Translation (Phase 5) and Anki (Phase 6) into modules: register their popup sections, buttons, settings pages and services through the extension points; the app must still work with any of them disabled. Anki's Settings on/off switch is replaced by the Module Manager.
+- [ ] A test module to prove each extension point.
+
+Done when: modules can add popup buttons, window buttons, settings pages and services without the core knowing about them.
+
+## Phase 8 — Installing modules after installation
+- [ ] Module index (list of available modules, versions, download URLs, SHA-256).
+- [ ] Download, verify checksum, install dependencies into the module's own folder, enable.
+- [ ] Update and uninstall.
+
+Done when: a module can be installed, updated and removed from the Module Manager.
+
 ## Phase 9 — Audio module
+Built as a module from the start, using the Phase 7 module system.
+
 - [ ] Windows Japanese TTS; ▶ for word and sentence.
 - [ ] Attach audio to Anki notes when both modules are enabled.
 - [ ] Clear message if no Japanese voice is installed.
@@ -146,4 +169,4 @@ Done when: one click puts a full card into Anki, and it syncs to the phone.
 - [ ] README with setup steps (Japanese OCR capability, Japanese voice, DeepL key, AnkiConnect) and capture tips (wait for the line to finish, select tightly, use borderless windowed mode).
 
 ## Order note
-Phases 4–6 don't depend on each other once Phase 3 is done, so they can be built in any order.
+Reordered on 2026-11-21: features are built as ordinary code first (Dictionary, History, Translation, Anki), and the Module system comes once the first optional feature (Anki) exists. It then converts the existing features into modules; Audio is the first feature written as a module from the start. History (Phase 4) and Translation (Phase 5) don't depend on each other; History was moved first on 2026-11-21.
