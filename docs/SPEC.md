@@ -54,9 +54,21 @@ Also seen: HUD quest tracker and prompts (small, semi-transparent), tutorial tex
 
 | Tier | Modules | State after install |
 |---|---|---|
-| **Core** | Tray + hotkey, capture, OCR, text analysis (words, furigana, romaji), main window, History, Settings, Module Manager | Always present, can't be disabled |
-| **Default** | Dictionary, Translation (DeepL) | Installed and enabled; can be disabled |
-| **Optional** | Anki, Audio (TTS) | Not installed; install any time from the installer or the Module Manager |
+| **Core** | Tray + hotkey, capture, OCR, main window (plain text), History, Settings, Module Manager | Always present, can't be disabled |
+| **Default** | Word splitting (UniDic-lite), Dictionary (JMdict + KANJIDIC2), Translation (DeepL) | Installed and enabled; can be disabled or removed |
+| **Optional** | Full UniDic (alternative to UniDic-lite), Anki, Audio (TTS) | Not installed; install any time from the installer or the Module Manager |
+
+**Components (decided 2026-11-22).** Word splitting and the dictionaries are optional components, **none installed by default**; each can be installed and removed (Settings → Components, or `tools/components.py`):
+
+| Component | Rule |
+|---|---|
+| UniDic-lite | optional, removable |
+| Full UniDic | optional, removable |
+| JMdict (English) | optional, removable; only installable while a UniDic is installed |
+| KANJIDIC2 | optional, removable; only installable while a UniDic is installed |
+| Wiktionary | optional, removable; only installable while a UniDic is installed |
+
+With no UniDic installed there is no word splitting: the window shows plain OCR text. Removing the last UniDic removes JMdict, KANJIDIC2 and Wiktionary automatically. Installed dictionaries are always used; Settings → Word splitting chooses None or an installed UniDic. Each component lives in its own folder (UniDic installed with `pip --target`, dictionaries built into one SQLite file each), the same approach the module system (Phase 7) will use.
 
 ### 3.1 Core
 
@@ -89,7 +101,7 @@ Also seen: HUD quest tracker and prompts (small, semi-transparent), tutorial tex
   - Lines are joined into one text block, keeping line breaks.
 
 **Text analysis**
-- Morphological analysis with **fugashi + UniDic** (MeCab). For each token: surface form, lemma (dictionary form), part of speech, conjugation type and form, kana reading, pronunciation.
+- (Word splitting module) Morphological analysis with **fugashi + UniDic-lite or full UniDic** (MeCab), chosen in Settings; skipped entirely when word splitting is *None*. For each token: surface form, lemma (dictionary form), part of speech, conjugation type and form, kana reading, pronunciation.
 - **Readings in context** come from UniDic (今日 → きょう). Particles use pronunciation (は → wa, を → o, へ → e).
 - **Romaji** via **cutlet** (Hepburn).
 - **Furigana** alignment: furigana covers only the kanji part (食べる → た over 食). Kana-only words get none.
@@ -197,7 +209,7 @@ The core never imports a module directly; it only talks through these points. A 
 | Settings | `%APPDATA%\mc-jisho-lens\settings.toml` | TOML |
 | DeepL key | Windows Credential Manager | — |
 | History + capture images | `%LOCALAPPDATA%\mc-jisho-lens\history.db` + `captures\` | SQLite + PNG |
-| Dictionary | Inside the Dictionary module folder | SQLite (read-only) |
+| Components (UniDic, JMdict, KANJIDIC2, Wiktionary) | Development: `data/components/`; installed: `%LOCALAPPDATA%\mc-jisho-lens\components\` (`JISHO_LENS_COMPONENTS` overrides) | One folder each; dictionaries as read-only SQLite |
 | Installed modules | `%LOCALAPPDATA%\mc-jisho-lens\modules\` | Folders |
 | Anki queue | Inside the Anki module's data folder | SQLite |
 | Logs | `%LOCALAPPDATA%\mc-jisho-lens\logs\` | Text, rotating |
@@ -241,6 +253,7 @@ The core never imports a module directly; it only talks through these points. A 
 
 ## 9. Licences and attribution
 - **JMdict, KANJIDIC2** — EDRDG licence (CC BY-SA 4.0). Attribution in the About screen; the derived database stays under the same licence.
+- **Wiktionary** (words JMdict lacks, via Wiktextract / kaikki.org) — CC BY-SA 4.0. Attribution in the About screen.
 - **UniDic** — BSD / LGPL / GPL (choose BSD).
 - **MeCab, fugashi, cutlet, RapidOCR, PaddleOCR models, ONNX Runtime** — permissive licences; to be listed in a third-party notices file.
 - **PySide6** — LGPL; must be dynamically linked (the default) and the licence included.

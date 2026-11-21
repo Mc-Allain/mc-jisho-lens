@@ -29,7 +29,7 @@ mc-jisho-lens/
 │  ├─ anki/                  optional
 │  └─ audio/                 optional
 ├─ tools/
-│  └─ build_dictionary.py    JMdict + KANJIDIC2 → SQLite
+│  └─ components.py          install / remove UniDic, JMdict, KANJIDIC2, Wiktionary
 ├─ tests/
 ├─ installer/                Inno Setup script
 └─ pyproject.toml
@@ -98,17 +98,34 @@ Phase 2 notes (2026-11-21):
 ## Phase 3 — Dictionary
 Built first, as ordinary core code behind a small `dictionary` service interface, so meanings reach the popup early. Phase 7 turns it into a module.
 
-- [ ] `tools/build_dictionary.py`: JMdict + KANJIDIC2 → SQLite with indexes for kanji form, kana form, and kanji character.
-- [ ] Lookup by lemma + reading, ranked by reading match and commonness.
-- [ ] Word popup: meanings by part of speech, conjugation breakdown, particle notes, loanword source, common/JLPT markers.
-- [ ] Kanji popup: on/kun readings (current one highlighted), meanings, strokes, grade, JLPT, example words.
-- [ ] "Not in dictionary" state for game terms and names: reading + romaji + per-kanji breakdown.
-- [ ] **Word-boundary check using JMdict** (idea from 2026-11-21 review): take MeCab's top alternative splits (`nbestToNodeList`) and move a boundary character to the next word only when (a) that creates a *common* JMdict word, (b) the word it leaves is *not* common, and (c) the leftover piece is still a dictionary word. Fixes 火元 + 素 → 火 + 元素 without breaking 攻撃 + 力, 日本 + 人, 大陸 + 中. A naive version without JMdict was tested and rejected: it fixed 火元素 but broke 攻撃力 → 攻 + 撃力, 日本人 → 日 + 本人, 大陸中 → 大 + 陸中.
-- [ ] **Compound readings for coined words**: when a run of single-kanji tokens isn't a JMdict word (炎 + 核, 翼 + 人), offer the on'yomi reading from KANJIDIC2 in the popup as an alternative (えんかく, よくじん) and mark it as a guess.
-- [ ] Re-evaluate UniDic-lite vs full UniDic once the JMdict checks are in place (suggestion on 2026-11-21: JMdict covers lite's gaps, saving 526 MB). Compare on real game lines.
-- [ ] Attribution in an About screen.
+- [x] `tools/build_dictionary.py`: JMdict + KANJIDIC2 → SQLite with indexes for kanji form, kana form, and kanji character.
+- [x] Lookup by lemma + reading, ranked by reading match and commonness.
+- [x] Word popup: meanings by part of speech, conjugation breakdown, particle notes, loanword source, common/JLPT markers.
+- [x] Kanji popup: on/kun readings (current one highlighted), meanings, strokes, grade, JLPT, example words.
+- [x] "Not in dictionary" state for game terms and names: reading + romaji + per-kanji breakdown.
+- [x] **Word-boundary check using JMdict** (idea from 2026-11-21 review): take MeCab's top alternative splits (`nbestToNodeList`) and move a boundary character to the next word only when (a) that creates a *common* JMdict word, (b) the word it leaves is *not* common, and (c) the leftover piece is still a dictionary word. Fixes 火元 + 素 → 火 + 元素 without breaking 攻撃 + 力, 日本 + 人, 大陸 + 中. A naive version without JMdict was tested and rejected: it fixed 火元素 but broke 攻撃力 → 攻 + 撃力, 日本人 → 日 + 本人, 大陸中 → 大 + 陸中.
+- [x] **Compound readings for coined words**: when a run of single-kanji tokens isn't a JMdict word (炎 + 核, 翼 + 人), offer the on'yomi reading from KANJIDIC2 in the popup as an alternative (えんかく, よくじん) and mark it as a guess.
+- [x] Re-evaluate UniDic-lite vs full UniDic once the JMdict checks are in place (suggestion on 2026-11-21: JMdict covers lite's gaps, saving 526 MB). Compare on real game lines.
+- [x] Attribution in an About screen.
 
 Done when: word and kanji popups are complete and work offline.
+
+Phase 3 notes (2026-11-21):
+- `tools/build_dictionary.py` downloads JMdict_e and KANJIDIC2 from edrdg.org (10.6 + 1.5 MB) and builds `data/dictionary.sqlite` (66 MB, ~10 s): 219,188 words, 13,108 kanji, plus a kanji → common-words table for examples. `data/` is git-ignored; the database is derived EDRDG data (CC BY-SA 4.0).
+- Lookups use UniDic's dictionary form + lemma, keep only entries with the reading used in the sentence and a compatible part of speech (the particle は no longer lists 葉/歯). Popup data for a page takes ~50 ms.
+- Popup: meanings grouped by part of speech with usage tags and loanword sources, "common word" marker, grammar breakdown for verb/adjective phrases (食べられなかった → 食べる + passive/potential + negative + past; 手伝ってもらう → te-form + てもらう), particle notes, longer dictionary words starting at the word (攻撃 → 攻撃力), clickable kanji panel (on/kun with the reading used here highlighted, strokes, grade, old JLPT level, frequency, common example words).
+- JLPT levels for *words* are not in JMdict, so they aren't shown; kanji show the old 4-level JLPT from KANJIDIC2.
+- Word-boundary check: fixes 火元 + 素 → 火 + 元素 and 大 + 陸中 → 大陸 + 中; leaves 攻撃力, 日本人, 経験値, 強化素材, 生産効率 alone (tests in `tests/test_dictionary.py`). On 40 game lines it changed 6 splits.
+- Coined compounds: 炎 + 核 → "maybe えんかく?", 翼 + 人 → "maybe よくじん?" (12 guesses on the 40 lines).
+- Katakana names: the joining rule now also covers pieces UniDic labels as symbols or doesn't know (ミィティ, シャラカ), while real compounds stay split (スター + リンク, キボ + ホイール).
+- **UniDic-lite vs full, re-evaluated with the JMdict checks** (`tools/compare_unidic.py`, 40 game lines): practically identical (503 vs 502 words, 22 vs 22 without a meaning, 6 vs 6 split fixes). Full was better on 2 lines: 大陸中 read じゅう (lite: ちゅう, wrong) and 長押し kept whole (lite: 長 + 押し). Lite saves 526 MB on disk. Decision pending (user).
+- About screen (tray menu) shows the EDRDG attribution and data versions.
+- **Decision 2026-11-22:** word splitting is now a setting — UniDic-lite (default, user's preference), full UniDic, or None (plain text). Full UniDic was removed from the environment; both UniDics are optional install groups (`unidic-lite` installed by default via `[tool.uv] default-groups`, `unidic-full` on request). The Dictionary (JMdict + KANJIDIC2) is its own on/off setting, only available with lite or full. Without the dictionary, words keep readings, romaji and grammar; the popup shows no meanings. Tests in `tests/test_modes.py`; e2e checked in all three setups.
+- **Wiktionary words (2026-11-22)**, to fix dialect / casual words JMdict lacks (じっちゃ, "grandpa"): `build_dictionary.py` imports the kaikki.org Japanese data (48.6 MB download, CC BY-SA 4.0) and keeps 22,547 Wiktionary words that JMdict doesn't have (popup shows them marked "From Wiktionary"). It also builds a MeCab **user dictionary** per installed UniDic (`data/userdic-lite.dic`, 6,058 nouns of 3+ kana or 2+ characters with kanji that UniDic doesn't know), used only when the Dictionary setting is on. Word cost 7000: fixed まえ + に + じっちゃ and changed ~1% of 2,000-3,000 sample sentences, almost all into real compounds (受話口, 聖騎士, チョコパイ); cost 4000 produced bad splits (亜 + 麻色).
+- Boundary check tightened at the same time (2026-11-22): it now only changes a split that contains a fragment (one-letter prefix/suffix, stray kana, or unknown non-katakana piece) and never accepts a new split that leaves a stray kana, and it never splits a Wiktionary word back up. Fixes two Phase 3 regressions: ほんと → ほん + と and お + ばあ → おば + あ; unknown katakana loanwords stay whole (テンプレ). On 2,000 sample sentences the JMdict check changed 4 splits. Tests in `tests/test_dictionary.py` (70 tests total).
+- Seen while testing: with a game and screen recorder running (CPU ~55%), OCR took 3.6–3.9 s per capture instead of ~1.5–2 s, so GPU OCR remains important. OCR also split one line at "……" in a sample image (read as a line break + "・").
+- **Components (2026-11-22):** UniDic-lite, full UniDic, JMdict, KANJIDIC2 and Wiktionary are now optional components, none installed by default (word splitting defaults to None = plain text). Each installs into its own folder (`data/components/` from source): UniDic via `pip --target`, each dictionary into its own SQLite file. Dictionaries can only be installed while a UniDic is installed and are removed with the last UniDic. Settings → Components has Install/Remove buttons (background work with progress); `tools/components.py` does the same from the command line and replaces `tools/build_dictionary.py`. The Wiktionary word-splitter list is rebuilt when a UniDic, Wiktionary or JMdict is installed or removed, and leaves out JMdict words while JMdict is installed (including them changed ~19% of sample sentences instead of ~1.4%). Removal works while the app has the files open (MeCab/SQLite are released first). Tests: `tests/test_components.py` (75 tests total).
+
 
 ## Phase 4 — History
 - [ ] `history.db` + saved capture images.
@@ -143,7 +160,7 @@ Built once the first optional feature (Anki) exists, so it is designed around re
 - [ ] Manifest format, loader, `ModuleContext`, extension points, events, services.
 - [ ] Enable / disable with restart-free reload where possible.
 - [ ] Module Manager UI (list, enable, disable) — install/uninstall comes in Phase 8.
-- [ ] Turn Dictionary (Phase 3), Translation (Phase 5) and Anki (Phase 6) into modules: register their popup sections, buttons, settings pages and services through the extension points; the app must still work with any of them disabled. Anki's Settings on/off switch is replaced by the Module Manager.
+- [ ] Turn Word splitting (UniDic-lite / full), Dictionary (Phase 3), Translation (Phase 5) and Anki (Phase 6) into modules (the Dictionary module requires a Word splitting module; removing word splitting disables the dictionary): register their popup sections, buttons, settings pages and services through the extension points; the app must still work with any of them disabled. Anki's Settings on/off switch is replaced by the Module Manager.
 - [ ] A test module to prove each extension point.
 
 Done when: modules can add popup buttons, window buttons, settings pages and services without the core knowing about them.
