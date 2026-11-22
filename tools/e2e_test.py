@@ -46,11 +46,14 @@ def main() -> int:
     ap.add_argument("--size", default="760x560", help="main window size for the pictures")
     ap.add_argument("--splitting", default="lite", choices=["lite", "full", "none"],
                     help="word splitting (that UniDic component must be installed)")
+    ap.add_argument("--collect", default="no", choices=["yes", "no"],
+                    help="answer to the OCR data question (yes: also press ✓ Correct)")
     args = ap.parse_args()
     from jisho_lens.core.settings import Settings
 
     s = Settings()
     s.analysis.word_splitting = args.splitting
+    s.data.collect = args.collect  # answer the one-time question in advance
     s.save()  # into the temporary JISHO_LENS_HOME
     image_path = Path(args.image)
     truth_path = image_path.with_suffix(".txt")
@@ -131,6 +134,10 @@ def main() -> int:
     def on_romaji_text(text) -> None:
         result["romaji_text"] = text
         lens.window.grab().save(str(out_dir / "e2e-3-romaji.png"))
+        if args.collect == "yes":
+            lens.window.confirm_btn.click()  # ✓ Correct
+        result["history"] = lens.history.count()
+        result["data"] = lens.ocr_data.stats()
         QTimer.singleShot(300, check_exclusion)
 
     def check_exclusion() -> None:
@@ -167,6 +174,7 @@ def main() -> int:
     rt = (result.get("romaji_text") or "").splitlines()
     print("Romaji  :", " / ".join(x for x in rt if x.isascii() and x.strip())[:200] or "(none)")
     print(f"Pictures: {out_dir / 'e2e-1-text.png'} (+ -2-popup, -3-romaji)")
+    print(f"History : {result.get('history')} capture(s); OCR data: {result.get('data')}")
     same = result.get("window_in_screenshot", 1.0)
     print(f"Main window pixels found in a screenshot: {same:.0%} "
           f"({'hidden from capture OK' if same < 0.5 else 'NOT hidden'})")

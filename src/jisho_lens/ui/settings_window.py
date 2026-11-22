@@ -12,8 +12,12 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
@@ -32,8 +36,10 @@ DELAYS = [0.0, 0.5, 1.0, 2.0]
 class SettingsWindow(QDialog):
     applied = Signal(object)  # Settings
     components_changed = Signal(list)  # component ids installed / removed
+    data_changed = Signal()  # collected data was deleted
 
-    def __init__(self, settings: Settings, hotkey_ok: bool = True) -> None:
+    def __init__(self, settings: Settings, hotkey_ok: bool = True, corrections=None,
+                 data=None, history=None) -> None:
         super().__init__(None, Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle("Jisho Lens settings")
         self._settings = copy.deepcopy(settings)
@@ -69,6 +75,42 @@ class SettingsWindow(QDialog):
         self.font_size.setRange(12, 48)
         self.font_size.setValue(settings.window.font_size)
 
+        # History and OCR data collection (opt-in, local only)
+        self.history_keep = QSpinBox()
+        self.history_keep.setRange(0, 100000)
+        self.history_keep.setSpecialValueText("No limit")
+        self.history_keep.setValue(settings.history.keep_last)
+        self.history_keep.setSuffix(" captures")
+        self.collect = QCheckBox("Keep my captures and corrections to improve OCR accuracy")
+        self.collect.setChecked(settings.data.collect == "yes")
+        self.collect.setToolTip("Off unless you agree. The data stays on this computer; nothing "
+                                "is sent anywhere unless you export and share it yourself.")
+        self.game = QLineEdit(settings.data.game)
+        self.game.setPlaceholderText("Optional, e.g. Azur Promilia")
+        self.delete_data_btn = QPushButton("Delete collected data…")
+        self.delete_data_btn.clicked.connect(self._delete_collected)
+        self._corrections = corrections
+        self._data, self._history = data, history
+        self.data_limit = QSpinBox()
+        self.data_limit.setRange(0, 100000)
+        self.data_limit.setSingleStep(50)
+        self.data_limit.setSpecialValueText("No limit")
+        self.data_limit.setSuffix(" MB")
+        self.data_limit.setValue(settings.data.max_mb)
+        self.data_limit.setToolTip("When full, the oldest unchecked samples are removed. "
+                                   "Corrected (edited or ✓) samples and favorites are always "
+                                   "kept.")
+        self.corrections_btn = QPushButton("Learned corrections…")
+        self.corrections_btn.setToolTip("Fixes learned from Edit and applied to later captures "
+                                        "while OCR data collection is on")
+        self.corrections_btn.clicked.connect(self._open_corrections)
+        self.corrections_btn.setEnabled(corrections is not None)
+        collect_note = QLabel("Stays on this computer. Nothing is sent anywhere unless you "
+                              "export it and share it yourself (History → Export pack).")
+        collect_note.setWordWrap(True)
+        collect_note.setStyleSheet("color: #8a8f99;")
+        self._collect_note = collect_note
+
         # Word splitting: None or an installed UniDic. Dictionaries are used when installed.
         self.splitting = QComboBox()
         self.splitting_hint = QLabel()
@@ -89,6 +131,16 @@ class SettingsWindow(QDialog):
         form.addRow("Text size", self.font_size)
         form.addRow("Word splitting", self.splitting)
         form.addRow("", self.splitting_hint)
+        form.addRow("Keep in History", self.history_keep)
+        form.addRow("OCR data", self.collect)
+        form.addRow("", self._collect_note)
+        form.addRow("Game name", self.game)
+        form.addRow("OCR data space", self.data_limit)
+        data_buttons = QHBoxLayout()
+        data_buttons.addWidget(self.corrections_btn)
+        data_buttons.addWidget(self.delete_data_btn)
+        data_buttons.addStretch(1)
+        form.addRow("", data_buttons)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -130,6 +182,30 @@ class SettingsWindow(QDialog):
             return  # don't close while installing / removing
         super().reject()
 
+    def _delete_collected(self) -> None:
+        from jisho_lens.core.ocr_data import OcrDataStore
+
+        store = self._data or OcrDataStore()
+        keep = self._history.favorite_sample_ids() if self._history is not None else set()
+        n = store.stats()["samples"]
+        kept = f"\n\n{len(keep)} samples of favorites are kept." if keep else ""
+        if QMessageBox.question(
+                self, "Delete collected data",
+                f"Delete all {n} collected OCR samples (corrected ones too) and the learned "
+                "corrections from this computer?\n\n"
+                f"History is kept. This can't be undone.{kept}",
+                defaultButton=QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            store.delete_all(keep)
+            if self._corrections is not None:
+                self._corrections.delete_all()
+            self.data_changed.emit()
+            QMessageBox.information(self, "Delete collected data", "Collected data deleted.")
+
+    def _open_corrections(self) -> None:
+        from jisho_lens.ui.corrections_dialog import CorrectionsDialog
+
+        CorrectionsDialog(self._corrections, self).exec()
+
     def _accept(self) -> None:
         seq = self.hotkey.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         if seq:
@@ -146,5 +222,12 @@ class SettingsWindow(QDialog):
         self._settings.capture.detect_speaker = self.speaker.isChecked()
         self._settings.window.font_size = self.font_size.value()
         self._settings.analysis.word_splitting = self.splitting.currentData() or "none"
+        self._settings.history.keep_last = self.history_keep.value()
+        self._settings.data.max_mb = self.data_limit.value()
+        if self.collect.isChecked():
+            self._settings.data.collect = "yes"
+        elif self._settings.data.collect == "yes":
+            self._settings.data.collect = "no"  # turned off; "ask" stays until answered
+        self._settings.data.game = self.game.text().strip()
         self.applied.emit(self._settings)
         self.accept()

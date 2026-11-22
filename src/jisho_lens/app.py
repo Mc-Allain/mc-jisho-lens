@@ -9,6 +9,7 @@ from __future__ import annotations
 import getpass
 import logging
 import sys
+import time
 
 from PIL import Image
 from PySide6.QtCore import QTimer
@@ -19,10 +20,18 @@ from jisho_lens import __version__, components
 from jisho_lens.core.analysis import SPLITTING_MODES
 from jisho_lens.core.analysis.pipeline import analyze_text
 from jisho_lens.core.capture import Rect, grab_desktop, grab_rect
-from jisho_lens.core.displays import describe_displays, enable_per_monitor_dpi_awareness
+from jisho_lens.core.displays import (
+    describe_displays,
+    enable_per_monitor_dpi_awareness,
+    get_displays,
+)
+from jisho_lens.core.history import HistoryStore
 from jisho_lens.core.hotkey import HotkeyManager
 from jisho_lens.core.logs import setup_logging
 from jisho_lens.core.ocr.worker import OcrOutcome, OcrService
+from jisho_lens.core.ocr_data import OcrDataStore
+from jisho_lens.core.ocr_data.corrections import CorrectionStore
+from jisho_lens.core.ocr_data.store import png_bytes, sample_id
 from jisho_lens.core.settings import Settings
 from jisho_lens.ui.capture_overlay import CaptureOverlay
 from jisho_lens.ui.icons import app_icon
@@ -46,6 +55,14 @@ def _another_instance_running() -> bool:
     return False
 
 
+def _screen_info() -> dict:
+    try:
+        d = get_displays()[0]
+        return {"width": d.width, "height": d.height, "scale": d.scale_percent}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 class JishoLens:
     def __init__(self, app: QApplication) -> None:
         self.app = app
@@ -54,6 +71,20 @@ class JishoLens:
         self._last_image: Image.Image | None = None
         self._pending_job: int | None = None
         self._settings_window: SettingsWindow | None = None
+        self._history_window = None
+        # History (core) and OCR data collection (opt-in, local only)
+        self.history = HistoryStore()
+        self.ocr_data = OcrDataStore()
+        self._capture_id: int | None = None  # History row of the capture on screen
+        self._sample_id: str | None = None  # OCR data sample of it, when collecting
+        # Remember my corrections (only while collecting): fixes learned from Edit
+        self.corrections = CorrectionStore()
+        self._ocr_lines: list[str] | None = None  # text as OCR read it, before corrections
+        self._applied: list = []  # corrections used on the text on screen
+        if self.settings.data.collecting and not self.corrections.path.exists():
+            self._learn_from_samples()
+        self._tidy_ocr_data()
+        self._retrying = False
 
         # single instance server
         QLocalServer.removeServer(_INSTANCE_NAME)
@@ -100,6 +131,10 @@ class JishoLens:
             w.recapture_requested.connect(self.start_capture)
             w.retry_requested.connect(self._retry)
             w.settings_requested.connect(self.open_settings)
+            w.confirm_requested.connect(self._on_confirm)
+            w.history_requested.connect(self.open_history)
+            w.undo_corrections_requested.connect(self._undo_corrections)
+            w.favorite_toggled.connect(self._on_favorite)
             w.geometry_changed.connect(self._save_geometry)
             self._window = w
         return self._window
@@ -113,6 +148,7 @@ class JishoLens:
         menu = QMenu()
         menu.addAction("Capture text", self.start_capture)
         menu.addAction("Show window", self.show_window)
+        menu.addAction("History…", self.open_history)
         menu.addSeparator()
         menu.addAction("Settings…", self.open_settings)
         menu.addAction("About…", self.open_about)
@@ -175,12 +211,15 @@ class JishoLens:
             self._read(shot.crop(rect))
 
     def _read(self, image: Image.Image, engine: str | None = None,
-              preset: str | None = None) -> None:
+              preset: str | None = None, retry: bool = False) -> None:
         self._last_image = image
+        self._retrying = retry
         engine = engine or self.settings.ocr.engine
         preset = preset or self.settings.ocr.preset
         self.window.set_engine_preset(engine, preset)
         self.window.show_busy(f"Reading… ({engine})")
+        self.window.set_corrections(0)
+        self._applied = []
         self.tray.setIcon(app_icon(busy=True))
         self._pending_job = self.ocr.submit(
             image, engine, preset,
@@ -194,15 +233,156 @@ class JishoLens:
         if self._last_image is None:
             self.start_capture()
             return
-        self._read(self._last_image, engine, preset)
+        self._read(self._last_image, engine, preset, retry=True)
 
     def _on_ocr_finished(self, outcome: OcrOutcome) -> None:
         if outcome.job.job_id != self._pending_job:
             return  # an older job finished after a newer one was started
         self.tray.setIcon(app_icon())
         status = f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
-        self._show_analysis(outcome.cleaned.lines, outcome.analysis, outcome.cleaned.speaker,
-                            status)
+        lines, analysis = outcome.cleaned.lines, outcome.analysis
+        self._ocr_lines, self._applied = list(lines), []
+        if self.settings.data.collecting:
+            try:
+                result = self.corrections.apply(lines)
+            except Exception:  # noqa: BLE001
+                log.exception("applying corrections failed")
+                result = None
+            if result and result.used:
+                self._applied = result.used
+                lines = result.lines
+                a = self.settings.analysis
+                analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
+                n = len(result.used)
+                status += f" · Applied {n} of your earlier correction{'s' if n > 1 else ''}"
+        self._show_analysis(lines, analysis, outcome.cleaned.speaker, status)
+        self.window.set_corrections(len(self._applied))
+        self._record(outcome, lines)
+
+    # ---------- history and OCR data ----------
+    def _record(self, outcome: OcrOutcome, lines: list[str]) -> None:
+        """Save the capture to History and, if the user agreed, keep it as an OCR sample."""
+        data = self.settings.data
+        if data.collect == "ask":
+            from jisho_lens.ui.consent import ask_consent
+
+            data.collect = "yes" if ask_consent(self._window) else "no"
+            self.settings.save()
+            log.info("OCR data collection: %s", data.collect)
+        job, raw = outcome.job, outcome.raw.text  # raw OCR (with speaker line) for OCR data
+        speaker = outcome.cleaned.speaker
+        shown = "\n".join(lines)  # History keeps the text as shown
+        self._sample_id = None
+        png = png_bytes(job.image)
+        same_file = None  # the sample's PNG when it is exactly this image (shared with History)
+        if data.collecting:
+            try:
+                self._sample_id = self.ocr_data.add_capture(
+                    job.image, raw, engine=job.engine, preset=job.preset,
+                    seconds=round(outcome.seconds, 3), speaker=speaker, game=data.game,
+                    screen=_screen_info(), png=png)
+                if self._sample_id == sample_id(png):
+                    same_file = self.ocr_data.png_path(self._sample_id)
+            except Exception:  # noqa: BLE001
+                log.exception("keeping the OCR sample failed")
+        if self.settings.history.enabled:
+            try:
+                if self._retrying and self._capture_id is not None:
+                    self.history.update_ocr(self._capture_id, shown, speaker, job.engine,
+                                            job.preset, outcome.seconds, self._sample_id)
+                else:
+                    self._capture_id = self.history.add(
+                        job.image, shown, speaker=speaker, engine=job.engine, preset=job.preset,
+                        seconds=outcome.seconds, sample_id=self._sample_id, png=png,
+                        same_file=same_file)
+                    self.history.enforce_retention(self.settings.history.keep_last)
+            except Exception:  # noqa: BLE001
+                log.exception("saving to History failed")
+        if data.collecting:
+            try:
+                keep = self.history.favorite_sample_ids() | {self._sample_id or ""}
+                trimmed = self.ocr_data.enforce_limit(data.max_mb * 1024 * 1024, keep)
+                if trimmed:
+                    log.info("OCR data over %d MB: removed %d oldest unchecked samples",
+                             data.max_mb, trimmed)
+            except Exception:  # noqa: BLE001
+                log.exception("trimming OCR data failed")
+        if self._history_window is not None:
+            self._history_window.refresh()
+        self._update_confirm()
+        self._update_favorite()
+
+    def _update_favorite(self) -> None:
+        c = self.history.get(self._capture_id) if self._capture_id is not None else None
+        self.window.set_favorite(c is not None, bool(c and c.favorite))
+
+    def _on_favorite(self, favorite: bool) -> None:
+        if self._capture_id is None:
+            return
+        self.history.set_favorite(self._capture_id, favorite)
+        self.window.status_label.setText(
+            "Added to favorites ★" if favorite else "Removed from favorites")
+        if self._history_window is not None:
+            self._history_window.refresh()
+
+    def _update_confirm(self) -> None:
+        sample = self.ocr_data.get(self._sample_id) if self._sample_id else None
+        self.window.set_collecting(sample is not None,
+                                   confirmed=bool(sample and sample.checked))
+
+    def _on_confirm(self) -> None:
+        if self._sample_id:
+            self.ocr_data.set_truth(self._sample_id, self.window.text(), "confirmed")
+            if self._applied:  # kept the OCR text after Undo: those corrections were wrong
+                self.corrections.forget(self._applied, self.window._lines)
+                self._applied = []
+            self.window.status_label.setText("Saved as correct ✓")
+            self._update_confirm()
+
+    def open_history(self) -> None:
+        from jisho_lens.ui.history_window import HistoryWindow
+
+        if self._history_window is None:
+            self._history_window = HistoryWindow(self.history, self.ocr_data, self.settings,
+                                                 self.corrections)
+            self._history_window.changed.connect(self._on_history_changed)
+            self._history_window.setWindowIcon(app_icon())
+            self._history_window.open_requested.connect(self.open_capture)
+        self._history_window.refresh()
+        self._history_window.show()
+        self._history_window.raise_()
+        self._history_window.activateWindow()
+
+    def _on_history_changed(self) -> None:
+        """Captures or collected data were deleted in the History window."""
+        if self._capture_id is not None and self.history.get(self._capture_id) is None:
+            self._capture_id = None
+        if self._sample_id and self.ocr_data.get(self._sample_id) is None:
+            self._sample_id = None
+        if self._window is not None:
+            self._update_confirm()
+            self._update_favorite()
+
+    def open_capture(self, capture_id: int) -> None:
+        capture = self.history.get(capture_id)
+        if capture is None:
+            return
+        self._capture_id, self._sample_id = capture.id, capture.sample_id
+        self._ocr_lines, self._applied = None, []
+        self.window.set_corrections(0)
+        if self._sample_id and self.ocr_data.get(self._sample_id) is None:
+            self._sample_id = None  # collected data was deleted
+        try:
+            self._last_image = capture.image()
+        except OSError:
+            self._last_image = None
+        a = self.settings.analysis
+        analysis = analyze_text(capture.lines, a.word_splitting, a.dictionary_active)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(capture.created_at))
+        self.window.present()
+        self._show_analysis(capture.lines, analysis, capture.speaker, f"History · {when}")
+        self._update_confirm()
+        self._update_favorite()
 
     def _show_analysis(self, lines, analysis, speaker, status) -> None:
         if analysis.warning:
@@ -210,9 +390,64 @@ class JishoLens:
         self.window.show_text(lines, analysis.tokens, speaker, status, analysis.dictionary)
 
     def _on_text_edited(self, lines: list[str]) -> None:
+        before = list(self.window._lines)  # the text as shown before this edit
         a = self.settings.analysis
         analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
         self._show_analysis(lines, analysis, self.window._speaker, "Edited")
+        self.window.set_corrections(0)
+        text = "\n".join(lines)
+        if self._capture_id is not None:
+            self.history.set_edited(self._capture_id, text)
+        if self._sample_id:
+            self.ocr_data.set_truth(self._sample_id, text, "edited")
+            status = "Edited · correction saved"
+            if self.settings.data.collecting:
+                try:
+                    learned = self.corrections.learn(before, lines, self._applied)
+                except Exception:  # noqa: BLE001
+                    log.exception("learning corrections failed")
+                    learned = 0
+                if learned:
+                    status += " · will be fixed in later captures"
+            self._applied = []
+            self.window.status_label.setText(status)
+        self._update_confirm()
+
+    def _tidy_ocr_data(self) -> None:
+        """Once: merge duplicate samples kept before duplicates were detected, and share
+        identical images between History and OCR data."""
+        marker = self.ocr_data.folder / "tidy-1.done"
+        if marker.exists() or not self.ocr_data.samples_dir.exists():
+            return
+        try:
+            from jisho_lens.core.storage import share_identical_images
+
+            mapping = self.ocr_data.remove_duplicates(self.history.favorite_sample_ids())
+            self.history.remap_samples(mapping)
+            shared = share_identical_images(self.history, self.ocr_data)
+            log.info("OCR data tidy: merged %d duplicate samples, shared %d images",
+                     len(mapping), shared)
+            marker.write_text("ok", encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            log.exception("tidying OCR data failed")
+
+    def _learn_from_samples(self) -> None:
+        """Learn from corrections saved before this feature existed (runs once)."""
+        try:
+            n = self.corrections.learn_from_samples(self.ocr_data.all())
+            log.info("learned %d corrections from saved samples", n)
+        except Exception:  # noqa: BLE001
+            log.exception("learning from saved samples failed")
+
+    def _undo_corrections(self) -> None:
+        """Show the text as OCR read it, without the corrections applied to it."""
+        if self._ocr_lines is None:
+            return
+        a = self.settings.analysis
+        analysis = analyze_text(self._ocr_lines, a.word_splitting, a.dictionary_active)
+        self._show_analysis(self._ocr_lines, analysis, self.window._speaker,
+                            "As OCR read it · Edit to fix, or ✓ if it's right")
+        self.window.set_corrections(0)
 
     def _check_word_splitting(self) -> bool:
         """Fall back to plain text when the selected UniDic isn't installed. True if changed."""
@@ -258,10 +493,12 @@ class JishoLens:
             self._settings_window.raise_()
             self._settings_window.activateWindow()
             return
-        self._settings_window = SettingsWindow(self.settings, self.hotkey_ok)
+        self._settings_window = SettingsWindow(self.settings, self.hotkey_ok, self.corrections,
+                                              self.ocr_data, self.history)
         self._settings_window.setWindowIcon(app_icon())
         self._settings_window.applied.connect(self._apply_settings)
         self._settings_window.components_changed.connect(self._on_components_changed)
+        self._settings_window.data_changed.connect(self._on_history_changed)
         self._settings_window.finished.connect(lambda _: setattr(self, "_settings_window", None))
         self._settings_window.show()
 
@@ -293,6 +530,7 @@ class JishoLens:
 
     # ---------- quit ----------
     def quit(self) -> None:
+        self.history.close()
         self.hotkeys.unregister()
         self.ocr.shutdown()
         self.tray.hide()

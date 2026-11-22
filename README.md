@@ -2,7 +2,7 @@
 
 **Jisho Lens** — a Windows tool for reading Japanese text in games. Press a hotkey, select text on screen, and click any word to see its reading, romaji and meanings. Translate to English with DeepL when you want to.
 
-Status: Phase 3 (capture → OCR → text with furigana, romaji, clickable words, meanings, grammar and kanji details). History comes in Phase 4, DeepL translation in Phase 5.
+Status: Phase 4 (capture → OCR → text with furigana, romaji, clickable words, meanings, grammar and kanji details; History; opt-in OCR data collection). DeepL translation comes in Phase 5.
 
 - [Specification](docs/SPEC.md)
 - [Build plan](docs/PLAN.md)
@@ -44,6 +44,10 @@ Tips: games must run in **borderless windowed** mode (the app can't draw over ex
 
 Without a UniDic there is no word splitting (plain text). JMdict, KANJIDIC2 and Wiktionary need a UniDic and are removed automatically with the last one. Components live in `data/components/` when running from source (`%LOCALAPPDATA%\mc-jisho-lens\components` when installed). Choose which installed UniDic to use in **Settings → Word splitting**.
 
+**History and OCR data.** Every capture is saved to **History** (tray menu or the History button): reopen, correct or delete past captures. After your first capture the app asks **once** whether it may keep your captures and corrections to improve OCR accuracy — this is **off unless you allow it**, and the data **stays on this computer**; nothing is sent anywhere unless you export a pack and share it yourself. With collection on, **Edit** saves your correction and **✓ Correct** marks text OCR got right. The app also **remembers your corrections**: when the same misread shows up in a later capture it is fixed automatically ("Applied N of your earlier corrections"; **Undo** shows what OCR read). Review or delete them in **Settings → OCR data → Learned corrections**.
+
+Space: the same sentence is kept as one sample however often you capture it, History and OCR data share one image file, and **Settings → OCR data space** (300 MB by default) removes the oldest *unchecked* samples when full. Corrected samples stay until you delete them yourself. **★ Favorite** (main window or History) keeps a phrase: favorites can't be deleted until you remove the star. History can show **All / Favorites / Corrected**, and delete the **selected** captures, a **time range**, everything (**Clear history**) or History plus all collected data (**Clear all**). In History you can **export**, **import** and **merge** data packs, and export them as an OCR test set (`tools/ocr_data.py` does the same from the command line). Change or delete it in **Settings → OCR data**.
+
 Settings are stored in `%APPDATA%\mc-jisho-lens\settings.toml`, logs in `%LOCALAPPDATA%\mc-jisho-lens\logs\`.
 
 ## Developer tools
@@ -54,4 +58,5 @@ uv run ruff check src tests tools spikes          # lint
 uv run python -X utf8 tools/e2e_test.py           # end-to-end check, no input needed
 uv run python tools/capture_test.py               # capture only
 uv run python tools/ocr_bench.py                  # OCR benchmark (see tests/ocr_set/README.md)
+uv run python tools/ocr_data.py                   # OCR data: stats, export, import, merge, testset
 ```

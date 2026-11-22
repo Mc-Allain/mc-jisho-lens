@@ -42,6 +42,25 @@ class CaptureSettings:
 
 
 @dataclass
+class HistorySettings:
+    enabled: bool = True
+    keep_last: int = 200  # captures kept in History (0 = no limit)
+
+
+@dataclass
+class DataSettings:
+    """OCR data collection: off until the user agrees (SPEC: opt-in, local only)."""
+
+    collect: str = "ask"  # "ask" (not answered yet) | "yes" | "no"
+    game: str = ""  # optional game name stored with collected samples
+    max_mb: int = 300  # space for samples (0 = no limit); corrected ones are always kept
+
+    @property
+    def collecting(self) -> bool:
+        return self.collect == "yes"
+
+
+@dataclass
 class WindowSettings:
     # x, y, width, height in Qt logical pixels; empty = place automatically
     geometry: list[int] = field(default_factory=list)
@@ -56,6 +75,8 @@ class Settings:
     ocr: OcrSettings = field(default_factory=OcrSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
     window: WindowSettings = field(default_factory=WindowSettings)
+    history: HistorySettings = field(default_factory=HistorySettings)
+    data: DataSettings = field(default_factory=DataSettings)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:

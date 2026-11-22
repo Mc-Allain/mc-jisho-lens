@@ -32,6 +32,10 @@ class MainWindow(QWidget):
     recapture_requested = Signal()
     retry_requested = Signal(str, str)  # engine, preset
     settings_requested = Signal()
+    confirm_requested = Signal()  # ✓ Correct: OCR read this capture right
+    history_requested = Signal()
+    favorite_toggled = Signal(bool)  # star the whole phrase (History capture)
+    undo_corrections_requested = Signal()  # show what OCR read before my corrections
     text_edited = Signal(list)  # new lines
     geometry_changed = Signal(list)
     display_changed = Signal(bool, bool)  # furigana, romaji
@@ -67,6 +71,11 @@ class MainWindow(QWidget):
         top.addWidget(self.speaker_label)
         top.addStretch(1)
         top.addWidget(self.status_label)
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.setToolTip("Show the text as OCR read it, without your earlier corrections")
+        self.undo_btn.setVisible(False)
+        self.undo_btn.clicked.connect(self.undo_corrections_requested)
+        top.addWidget(self.undo_btn)
         top.addWidget(self.furigana_btn)
         top.addWidget(self.romaji_btn)
 
@@ -84,6 +93,17 @@ class MainWindow(QWidget):
         self.recapture_btn = QPushButton("Re-capture")
         self.edit_btn = QPushButton("Edit")
         self.copy_btn = QPushButton("Copy")
+        self.confirm_btn = QPushButton("✓ Correct")
+        self.confirm_btn.setToolTip("OCR read this correctly: keep it as a checked sample "
+                                    "(only when OCR data collection is on)")
+        self.confirm_btn.setVisible(False)
+        self.history_btn = QPushButton("History")
+        self.favorite_btn = QPushButton("☆ Favorite")
+        self.favorite_btn.setCheckable(True)
+        self.favorite_btn.setToolTip("Keep this phrase in History. Favorites can't be deleted "
+                                     "until you remove the star.")
+        self.favorite_btn.setVisible(False)
+        self.favorite_btn.clicked.connect(self._favorite_clicked)
         self.engine_box = QComboBox()
         self.engine_box.addItems(ENGINE_NAMES)
         self.preset_box = QComboBox()
@@ -92,7 +112,8 @@ class MainWindow(QWidget):
         self.retry_btn.setToolTip("Read the same capture again with this engine and preset")
         self.settings_btn = QPushButton("Settings")
         bottom = QHBoxLayout()
-        for w in (self.recapture_btn, self.edit_btn, self.copy_btn):
+        for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.confirm_btn,
+                  self.favorite_btn, self.history_btn):
             bottom.addWidget(w)
         bottom.addStretch(1)
         for w in (self.engine_box, self.preset_box, self.retry_btn, self.settings_btn):
@@ -112,6 +133,8 @@ class MainWindow(QWidget):
         self.recapture_btn.clicked.connect(self.recapture_requested)
         self.edit_btn.clicked.connect(self._toggle_edit)
         self.copy_btn.clicked.connect(self._copy)
+        self.confirm_btn.clicked.connect(self.confirm_requested)
+        self.history_btn.clicked.connect(self.history_requested)
         self.retry_btn.clicked.connect(
             lambda: self.retry_requested.emit(self.engine_box.currentText(),
                                               self.preset_box.currentText())
@@ -184,8 +207,29 @@ class MainWindow(QWidget):
             f"setOpt('furi', {str(furi).lower()}); setOpt('romaji', {str(rom).lower()});")
         self.display_changed.emit(furi, rom)
 
+    def set_collecting(self, collecting: bool, confirmed: bool = False) -> None:
+        """Show ✓ Correct only while OCR data collection is on for the shown capture."""
+        self.confirm_btn.setVisible(collecting)
+        self.confirm_btn.setEnabled(collecting and not confirmed)
+        self.confirm_btn.setText("✓ Saved" if confirmed else "✓ Correct")
+
+    def set_favorite(self, available: bool, favorite: bool = False) -> None:
+        """Show the star while the text on screen is a History capture."""
+        self.favorite_btn.setVisible(available)
+        self.favorite_btn.setChecked(favorite)
+        self.favorite_btn.setText("★ Favorite" if favorite else "☆ Favorite")
+
+    def _favorite_clicked(self, checked: bool) -> None:
+        self.favorite_btn.setText("★ Favorite" if checked else "☆ Favorite")
+        self.favorite_toggled.emit(checked)
+
+    def set_corrections(self, count: int) -> None:
+        """Show Undo while the text has `count` > 0 of the user's earlier corrections."""
+        self.undo_btn.setVisible(count > 0)
+
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.retry_btn):
+        for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.retry_btn,
+                  self.confirm_btn):
             w.setEnabled(enabled)
 
     # ---------- edit / copy ----------

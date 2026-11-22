@@ -130,26 +130,40 @@ Phase 3 notes (2026-11-21):
 ## Phase 4 — History and OCR data collection
 
 **History** (core):
-- [ ] `history.db` + saved capture images.
-- [ ] History screen: list with thumbnails, open in main window, delete, retention setting.
+- [x] `history.db` + saved capture images.
+- [x] History screen: list with thumbnails, open in main window, delete, retention setting.
 
 **OCR data collection** (to improve OCR accuracy for this copy of the app) — **off by default, opt-in only**:
-- [ ] Ask once (first capture after install/update): "Allow Jisho Lens to keep your captures and corrections to improve OCR accuracy for your copy of the app? The data stays on this computer. Nothing is sent anywhere unless you export it and share it yourself." Buttons: Allow / Don't allow. The answer is saved; changeable any time in Settings ("Collect OCR data", off by default), with a "Delete collected data" button.
-- [ ] When allowed, each capture keeps: the screenshot crop, the OCR result, engine / image setting / time taken, text type, game name (optional), screen resolution and scaling. Not kept: anything outside the selected area, user names, file paths.
-- [ ] **Edit** saves the corrected text as the right answer; a **Correct ✓** button marks OCR output as right without edits. Only checked samples (✓ or edited) count for accuracy.
-- [ ] Collected samples are separate from History retention (deleting old history doesn't delete collected samples, and vice versa).
+- [x] Ask once (first capture after install/update): "Allow Jisho Lens to keep your captures and corrections to improve OCR accuracy for your copy of the app? The data stays on this computer. Nothing is sent anywhere unless you export it and share it yourself." Buttons: Allow / Don't allow. The answer is saved; changeable any time in Settings ("Collect OCR data", off by default), with a "Delete collected data" button.
+- [x] When allowed, each capture keeps: the screenshot crop, the OCR result, engine / image setting / time taken, text type, game name (optional), screen resolution and scaling. Not kept: anything outside the selected area, user names, file paths.
+- [x] **Edit** saves the corrected text as the right answer; a **Correct ✓** button marks OCR output as right without edits. Only checked samples (✓ or edited) count for accuracy.
+- [x] Collected samples are separate from History retention (deleting old history doesn't delete collected samples, and vice versa).
 
 **Export / import / merge** (sharing between users is manual and opt-in):
-- [ ] **Export** a data pack (`.zip`): all, checked only, or one game; shows the crops before writing (screenshots can contain player names or chat). Includes a manifest (format version, app version, counts) and an anonymous random contributor ID, no personal details.
-- [ ] **Import** a pack: validate (only images + JSON, size limits, no unsafe paths), add to the local set.
-- [ ] **Merge / append** packs: duplicates detected by image content hash; different corrections of the same image kept side by side and flagged for review.
-- [ ] Export to the OCR test-set format (`tests/ocr_set/images/`) and run `tools/ocr_bench.py` on it: best engine and image setting per text type.
-- [ ] Command-line tools for export / import / merge, plus buttons in the History screen.
-- [ ] Words people corrected (names, game terms) can be offered to the word splitter's list (later).
+- [x] **Export** a data pack (`.zip`): all, checked only, or one game; shows the crops before writing (screenshots can contain player names or chat). Includes a manifest (format version, app version, counts) and an anonymous random contributor ID, no personal details.
+- [x] **Import** a pack: validate (only images + JSON, size limits, no unsafe paths), add to the local set.
+- [x] **Merge / append** packs: duplicates detected by image content hash; different corrections of the same image kept side by side and flagged for review.
+- [x] Export to the OCR test-set format (`tests/ocr_set/images/`) and run `tools/ocr_bench.py` on it: best engine and image setting per text type.
+- [x] Command-line tools for export / import / merge, plus buttons in the History screen.
+- [x] Remember my corrections: fixes made with Edit are applied to later captures (with Undo), while collection is on.
+- [x] Space: one sample per sentence, one image file shared by History and OCR data, a size limit (300 MB by default) that never removes corrected samples or favorites.
+- [x] Favorites (★) and History filters (All / Favorites / Corrected); delete selected, a time range, Clear history, Clear all. Favorites are never deleted until unstarred.
+- [ ] (later) Voicing-mark repair using the dictionary (寄るそ → 寄るぞ before any correction exists).
+- [ ] (later) Words people corrected (names, game terms) can be offered to the word splitter's list.
 
 Notes: no automatic collection from other users and no server; packs are shared privately (game screenshots are the publisher's copyrighted material).
 
 Done when: past captures can be browsed and reopened; with consent given, captures and corrections are kept locally, and packs can be exported, imported, merged and benchmarked.
+
+Phase 4 notes (2026-11-22):
+- History: `history.db` + PNG crops in the app data folder; the History window lists captures (thumbnail, time, engine, edited / collected / ✓ marks), opens one back in the main window (Retry and Edit work on it) and deletes one or all. Retention: keep the last 200 captures by default (Settings → Keep in History). History stores the text as shown (speaker separate); the raw OCR text is kept only in collected samples.
+- OCR data collection is off until answered: the question appears once, after the first capture (default button: Don't allow). Settings → OCR data turns it on/off, sets an optional game name, and deletes collected data. Each sample is named by the SHA-256 of its PNG, so repeated captures of the same image are one sample. Edit saves the correction as the right answer; ✓ Correct confirms OCR was right.
+- Packs: `.zip` with `manifest.json` + `samples/<sha256>.png|json`; import rejects anything else (unexpected names, path tricks, oversized files, images that don't match their hash, bad JSON). Merging keeps differing answers side by side and flags them for review. Export shows the crops first. `tools/ocr_data.py` does export / import / merge / testset from the command line; the test set feeds `tools/ocr_bench.py`.
+- Checked: 11 new tests (`tests/test_history_and_ocr_data.py`, 86 total); end to end with collection off (History only) and on (sample + ✓); reopening from History + Edit saves the correction.
+- Remember my corrections (added after the first real captures: every OCR engine dropped voicing marks — そうた, 寄るそ, ついて, もらうんた — and a second, slightly different crop repeated the same mistakes). Edit learns each small change with one character of context on each side (at least 3 characters; a line start/end counts as context), e.g. 「うた、」→「うだ、」, and stores it in `ocr-data/corrections.json`. Later captures get those fixes before analysis; the status says "Applied N of your earlier corrections" and **Undo** shows the OCR text. A correction is forgotten when the user puts the OCR text back (Edit) or confirms it with ✓ after Undo. Big rewrites (over 6 characters) and line joins/splits aren't learned. Corrections saved before this existed are learned once from the edited samples. Settings → OCR data → Learned corrections lists and deletes them. Collected samples keep the raw OCR text, so the data stays honest. Checked: 7 tests (`tests/test_corrections.py`, 93 total); end to end on the two real captures: capture 1 + Edit learns 4 fixes, capture 2 shows all 4 applied, Undo restores the OCR text.
+- Space. The same dialogue line captured 4 times (4 slightly different crops) had become 4 samples (0.8 MB) plus 4 History copies. Now: a capture is not kept as a new sample when its OCR text equals a kept sample's OCR text or right answer (speaker line included); its capture points at that sample, so Edit and ✓ update it. History and OCR data share one PNG through a hard link when the sample is exactly that image. Settings → OCR data space (300 MB default, 0 = no limit) removes the oldest unchecked samples first; corrected (edited / ✓) samples and favorites' samples are never removed automatically, even over the limit. A one-time tidy (`ocr-data/tidy-1.done`) merges duplicates kept earlier (corrected ones all stay) and links identical images. On a copy of the real data: 4 samples (791 KB) → 2 (332 KB), and a fifth crop of the same line added no sample.
+- Favorites: ★ Favorite in the main window (for any capture in History) and in History. Favorites are skipped by single/multi delete, time-range delete, Clear history, Clear all, Delete collected data and the History limit (they don't count towards it); remove the star to delete one. History filter: All / ★ Favorites / Corrected (fixed with Edit). Delete options: Delete (selected; Ctrl/Shift for several), Delete range… (from–to, shows how many go and how many favorites stay), Clear history… (History only), Clear all… (History, collected samples including corrected ones, learned corrections). Old `history.db` files get the `favorite` column on open.
+- Checked: 13 tests (`tests/test_storage.py`, 106 total); end to end on a copy of the real data (tidy, repeat capture, ★, delete refused, filters, range preview).
 
 ## Phase 5 — Translation (DeepL)
 Built as ordinary code, like the Dictionary; Phase 7 turns it into a module.
