@@ -51,7 +51,7 @@ Windows.Media.Ocr. <b>UI:</b> Qt for Python / PySide6 (LGPL v3).</p>
 
 class AboutWindow(QDialog):
     def __init__(self) -> None:
-        super().__init__(None, Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(None)  # stacking: see _ChildrenOnTop in app.py
         self.setWindowTitle("About Jisho Lens")
         self.setMinimumWidth(460)
         label = QLabel(ABOUT_HTML.format(version=__version__, dictionary=_dictionary_line()))

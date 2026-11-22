@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,6 +31,11 @@ from jisho_lens.core.settings import Settings
 from jisho_lens.ui.components_panel import ComponentsPanel
 
 DELAYS = [0.0, 0.5, 1.0, 2.0]
+ON_CAPTURE = [
+    ("Keep other windows, text window in front", "above"),
+    ("Keep other windows in front of the text window", "behind"),
+    ("Close other windows", "close"),
+]
 
 
 class SettingsWindow(QDialog):
@@ -40,7 +45,7 @@ class SettingsWindow(QDialog):
 
     def __init__(self, settings: Settings, hotkey_ok: bool = True, corrections=None,
                  data=None, history=None) -> None:
-        super().__init__(None, Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(None)  # stacking: see _ChildrenOnTop in app.py
         self.setWindowTitle("Jisho Lens settings")
         self._settings = copy.deepcopy(settings)
 
@@ -70,6 +75,15 @@ class SettingsWindow(QDialog):
         self.remove_icons.setChecked(settings.capture.remove_key_icons)
         self.speaker = QCheckBox("Show the speaker's name separately")
         self.speaker.setChecked(settings.capture.detect_speaker)
+
+        self.on_capture = QComboBox()
+        for label, key in ON_CAPTURE:
+            self.on_capture.addItem(label, key)
+        i = self.on_capture.findData(settings.window.on_capture)
+        self.on_capture.setCurrentIndex(i if i >= 0 else 0)
+        self.on_capture.setToolTip("What happens to History, Settings and other Jisho Lens "
+                                   "windows when you capture text again. Open windows are "
+                                   "never in the screenshot.")
 
         self.font_size = QSpinBox()
         self.font_size.setRange(12, 48)
@@ -105,16 +119,15 @@ class SettingsWindow(QDialog):
                                         "while OCR data collection is on")
         self.corrections_btn.clicked.connect(self._open_corrections)
         self.corrections_btn.setEnabled(corrections is not None)
-        collect_note = QLabel("Stays on this computer. Nothing is sent anywhere unless you "
-                              "export it and share it yourself (History → Export pack).")
-        collect_note.setWordWrap(True)
+        # fixed line breaks: a word-wrapped label in a form gets too little height and is cut
+        collect_note = QLabel("Stays on this computer. Nothing is sent anywhere unless\n"
+                              "you export it and share it yourself (History → Export pack).")
         collect_note.setStyleSheet("color: #8a8f99;")
         self._collect_note = collect_note
 
         # Word splitting: None or an installed UniDic. Dictionaries are used when installed.
         self.splitting = QComboBox()
         self.splitting_hint = QLabel()
-        self.splitting_hint.setWordWrap(True)
         self.splitting_hint.setStyleSheet("color: #8a8f99;")
         self._fill_splitting(settings.analysis.word_splitting)
         self.components = ComponentsPanel(self)
@@ -129,6 +142,7 @@ class SettingsWindow(QDialog):
         form.addRow("", self.remove_icons)
         form.addRow("", self.speaker)
         form.addRow("Text size", self.font_size)
+        form.addRow("On new capture", self.on_capture)
         form.addRow("Word splitting", self.splitting)
         form.addRow("", self.splitting_hint)
         form.addRow("Keep in History", self.history_keep)
@@ -162,10 +176,11 @@ class SettingsWindow(QDialog):
                 self.splitting.addItem(SPLITTING_LABELS[mode], mode)
         idx = self.splitting.findData(current)
         self.splitting.setCurrentIndex(idx if idx >= 0 else self.splitting.findData("none"))
-        self.splitting_hint.setText(
-            "" if self.splitting.count() > 1 else
-            "Install UniDic-lite or full UniDic below for clickable words, readings and "
-            "dictionaries.")
+        hint = "" if self.splitting.count() > 1 else (
+            "Install UniDic-lite or full UniDic below for clickable words,\n"
+            "readings and dictionaries.")
+        self.splitting_hint.setText(hint)
+        self.splitting_hint.setVisible(bool(hint))  # no empty gap when nothing to say
 
     def _components_changed(self, changed: list) -> None:
         current = self.splitting.currentData()
@@ -221,6 +236,7 @@ class SettingsWindow(QDialog):
         self._settings.capture.remove_key_icons = self.remove_icons.isChecked()
         self._settings.capture.detect_speaker = self.speaker.isChecked()
         self._settings.window.font_size = self.font_size.value()
+        self._settings.window.on_capture = self.on_capture.currentData() or "above"
         self._settings.analysis.word_splitting = self.splitting.currentData() or "none"
         self._settings.history.keep_last = self.history_keep.value()
         self._settings.data.max_mb = self.data_limit.value()

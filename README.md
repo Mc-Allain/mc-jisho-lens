@@ -30,6 +30,8 @@ The app starts in the system tray (字 icon). Then:
 
 In the window: **click any word** to see its reading in that sentence, romaji, meanings, dictionary form and a grammar breakdown for verbs; click a **kanji** in the popup for its readings (the one used here highlighted), meaning and common words. Words missing from the dictionary (names, game terms) are marked, and coined kanji compounds get a guessed reading. **Furigana** and **Romaji** buttons switch the readings above the kanji and the romaji line on or off. **Re-capture**, **Edit** (fix OCR mistakes; the words are re-analysed), **Copy**, and **Retry** with another OCR engine or image preset. Closing the window only hides it; quit from the tray icon's menu. Left-clicking the tray icon shows or hides the window.
 
+Other Jisho Lens windows (History, Settings, dialogs) open in front of the text window and come back in front when you click them; when you click the text window or another app they go behind it. On a new capture they are kept open with the new text window in front of them; **Settings → On new capture** can instead keep them in front or close them. They never appear in the screenshot.
+
 Tips: games must run in **borderless windowed** mode (the app can't draw over exclusive fullscreen). Wait until a dialogue line has fully appeared before capturing, or set a capture delay in Settings.
 
 **Components** (nothing is installed by default; each can be removed again):

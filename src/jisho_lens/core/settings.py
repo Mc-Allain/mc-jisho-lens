@@ -67,6 +67,9 @@ class WindowSettings:
     font_size: int = 22
     show_furigana: bool = True
     show_romaji: bool = False
+    # other windows (History, Settings…) on a new capture: "above" keeps them open with the
+    # new text window in front, "behind" keeps them in front of it, "close" closes them
+    on_capture: str = "above"
 
 
 @dataclass

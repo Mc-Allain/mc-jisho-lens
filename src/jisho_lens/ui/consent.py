@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 TITLE = "Help improve OCR for your copy of Jisho Lens?"
@@ -20,7 +19,9 @@ DETAILS = (
 )
 
 
-def ask_consent(parent=None) -> bool:
+def ask_consent(parent=None) -> bool | None:
+    """True = allow, False = don't allow, None = not answered (the app closed the question,
+    e.g. because a new capture started; it is asked again later)."""
     box = QMessageBox(parent)
     box.setWindowTitle(TITLE)
     box.setIcon(QMessageBox.Icon.Question)
@@ -29,6 +30,7 @@ def ask_consent(parent=None) -> bool:
     allow = box.addButton("Allow", QMessageBox.ButtonRole.AcceptRole)
     deny = box.addButton("Don't allow", QMessageBox.ButtonRole.RejectRole)
     box.setDefaultButton(deny)
-    box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
     box.exec()
+    if box.property("dismissed"):
+        return None
     return box.clickedButton() is allow

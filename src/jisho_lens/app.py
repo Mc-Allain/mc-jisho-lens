@@ -12,9 +12,9 @@ import sys
 import time
 
 from PIL import Image
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon, QWidget
 
 from jisho_lens import __version__, components
 from jisho_lens.core.analysis import SPLITTING_MODES
@@ -33,6 +33,7 @@ from jisho_lens.core.ocr_data import OcrDataStore
 from jisho_lens.core.ocr_data.corrections import CorrectionStore
 from jisho_lens.core.ocr_data.store import png_bytes, sample_id
 from jisho_lens.core.settings import Settings
+from jisho_lens.ui import winapi
 from jisho_lens.ui.capture_overlay import CaptureOverlay
 from jisho_lens.ui.icons import app_icon
 from jisho_lens.ui.main_window import MainWindow
@@ -63,10 +64,66 @@ def _screen_info() -> dict:
         return {}
 
 
+class _ChildrenOnTop(QObject):
+    """Stacking of the windows that belong to the text window (History, Settings, About,
+    dialogs, message boxes): in front when opened or clicked, behind when the user focuses
+    something else (the text window or another app). Moving between them doesn't count."""
+
+    def __init__(self, lens: JishoLens) -> None:
+        super().__init__()
+        self.lens = lens
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        kind = event.type()
+        if kind in (QEvent.Type.Show, QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate) \
+                and isinstance(obj, QWidget) and obj.isWindow() and self._is_child(obj):
+            hwnd = int(obj.winId())
+            if kind == QEvent.Type.Show:
+                # not owned by the text window: an owned window can never go behind it
+                if self.lens._window is not None \
+                        and winapi.owner(hwnd) == int(self.lens._window.winId()):
+                    winapi.set_owner(hwnd, 0)
+                winapi.set_topmost(hwnd)  # in front when opened
+            elif kind == QEvent.Type.WindowActivate:
+                if time.monotonic() >= self.lens._settle_until:
+                    winapi.set_topmost(hwnd)  # clicked / focused again: in front
+            else:
+                # focus moved; see where it went once Windows has finished switching
+                QTimer.singleShot(50, self.lens._focus_moved)
+        return False
+
+    def _is_child(self, window: QWidget) -> bool:
+        text_window = self.lens._window
+        return (text_window is not None and window is not text_window
+                and _descends_from(window, text_window))
+
+
+def _descends_from(widget: QWidget, ancestor: QWidget) -> bool:
+    """True if `ancestor` is up the parent chain, across windows (isAncestorOf stops at
+    window boundaries)."""
+    w = widget.parentWidget()
+    while w is not None:
+        if w is ancestor:
+            return True
+        w = w.parentWidget()
+    return False
+
+
+def _depth(widget: QWidget) -> int:
+    n, w = 0, widget.parentWidget()
+    while w is not None:
+        n, w = n + 1, w.parentWidget()
+    return n
+
+
 class JishoLens:
     def __init__(self, app: QApplication) -> None:
         self.app = app
         self.settings = Settings.load()
+        self._excluded: list = []  # child windows left out of the capture being taken
+        self._settle_until = 0.0  # ignore activations until then (overlay closing)
+        self._on_top = _ChildrenOnTop(self)
+        app.installEventFilter(self._on_top)
         self._overlay: CaptureOverlay | None = None
         self._last_image: Image.Image | None = None
         self._pending_job: int | None = None
@@ -137,7 +194,24 @@ class JishoLens:
             w.favorite_toggled.connect(self._on_favorite)
             w.geometry_changed.connect(self._save_geometry)
             self._window = w
+            # windows opened from the tray before the text window existed
+            for child in (self._settings_window, self._history_window,
+                          getattr(self, "_about", None)):
+                if child is not None:
+                    self._own(child)
         return self._window
+
+    def _own(self, child) -> None:
+        """Make `child` belong to the text window (stacking rules in _ChildrenOnTop, closing
+        on a new capture). The text window is created on first use (Qt WebEngine is heavy),
+        so a window opened from the tray before that is adopted when it is created."""
+        if self._window is None or child.parent() is self._window:
+            return
+        visible, geometry = child.isVisible(), child.geometry()
+        child.setParent(self._window, child.windowFlags() | Qt.WindowType.Window)
+        if visible:
+            child.setGeometry(geometry)
+            child.show()
 
     def show_window(self) -> None:
         self.window.present()
@@ -164,6 +238,9 @@ class JishoLens:
 
         self._about = AboutWindow()
         self._about.setWindowIcon(app_icon())
+        self._about.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._about.destroyed.connect(lambda: setattr(self, "_about", None))
+        self._own(self._about)
         self._about.show()
 
     def _on_tray_activated(self, reason) -> None:
@@ -189,12 +266,104 @@ class JishoLens:
     def start_capture(self) -> None:
         if self._overlay is not None:
             return  # already selecting
+        if self.settings.window.on_capture == "close":
+            changed = self._close_children()
+        else:  # keep them open, but leave them out of the screenshot
+            changed = self._exclude_children(True)
+        if changed:
+            # let Windows update the screen before the screenshot
+            QTimer.singleShot(150, self._grab_and_select)
+        else:
+            self._grab_and_select()
+
+    def _exclude_children(self, exclude: bool) -> bool:
+        """Leave the open child windows out of screenshots (they stay on screen) while a
+        capture is being taken. Returns True if any is open."""
+        children = self._children() if exclude else self._excluded
+        self._excluded = children if exclude else []
+        for w in children:
+            try:
+                winapi.exclude_from_capture(int(w.winId()), exclude)
+            except RuntimeError:  # closed in the meantime
+                pass
+        return bool(children)
+
+    def _child_handles(self) -> list[int]:
+        out = []
+        for w in self._children():
+            try:
+                out.append(int(w.winId()))
+            except RuntimeError:  # closed in the meantime
+                pass
+        return out
+
+    def _focus_moved(self) -> None:
+        """A child window lost focus. If focus went outside them (the text window, another
+        app), they all go behind it; between them (History -> Settings) nothing changes."""
+        children = self._child_handles()
+        foreground = winapi.foreground()
+        if not children or foreground in children:
+            return
+        self._send_behind(children, foreground)
+
+    def _send_behind(self, children: list[int], foreground: int = 0) -> None:
+        """No longer always on top: behind the text window and every always-on-top window,
+        and behind `foreground` when that is a normal app window."""
+        below = foreground if foreground and not winapi.is_topmost(foreground) else 0
+        for hwnd in reversed(children):
+            winapi.set_topmost(hwnd, False)
+            if below:
+                winapi.place_below(hwnd, below)
+
+    def _text_window_in_front(self) -> None:
+        """On-capture option "in front": the open windows go behind the new text window."""
+        self._settle_until = time.monotonic() + 0.8  # see _ChildrenOnTop (overlay closing)
+        self._send_behind(self._child_handles())
+        winapi.set_topmost(int(self.window.winId()))
+
+    def _children_in_front(self) -> None:
+        """On-capture option "behind": the open windows stay in front of the text window."""
+        self._settle_until = time.monotonic() + 0.8
+        for hwnd in self._child_handles():
+            winapi.set_topmost(hwnd)
+
+    def _children(self) -> list[QWidget]:
+        """Visible windows that belong to the text window: History, Settings, About, and
+        the dialogs and message boxes opened from them or from the text window."""
+        known = [self._settings_window, self._history_window, getattr(self, "_about", None)]
+        out = [w for w in known if w is not None and w.isVisible()]
+        if self._window is not None:
+            for w in QApplication.topLevelWidgets():
+                if w.isVisible() and w not in out and _descends_from(w, self._window):
+                    out.append(w)
+        return out
+
+    def _close_children(self) -> bool:
+        """A new capture closes every child window. Returns True if any was open."""
+        children = self._children()
+        # innermost first, so modal dialogs and message boxes end before their parents
+        children.sort(key=lambda w: -_depth(w))
+        for w in children:
+            w.setProperty("dismissed", True)  # e.g. the consent question stays unanswered
+            if w is self._settings_window and self._settings_window.components.busy:
+                w.hide()  # a component is installing: keep it running; Settings reopens it
+            elif isinstance(w, QDialog):
+                w.reject()
+            else:
+                w.close()
+        return bool(children)
+
+    def _grab_and_select(self) -> None:
+        if self._overlay is not None:
+            return
         try:
             shot = grab_desktop()  # main window is excluded from captures
         except Exception:  # noqa: BLE001
             log.exception("screenshot failed")
             self.tray.showMessage("Jisho Lens", "Screenshot failed.", app_icon(), 3000)
             return
+        finally:
+            self._exclude_children(False)
         self._overlay = CaptureOverlay(shot, lambda rect: self._on_selected(shot, rect))
         self._overlay.show()
 
@@ -204,11 +373,24 @@ class JishoLens:
             return
         delay = self.settings.capture.delay_seconds
         self.window.present()
+        if self.settings.window.on_capture == "above":
+            self._text_window_in_front()
+        elif self.settings.window.on_capture == "behind":
+            self._children_in_front()
         if delay > 0:
             self.window.show_busy(f"Waiting {delay:g} s…")
-            QTimer.singleShot(int(delay * 1000), lambda: self._read(grab_rect(rect)))
+            if self.settings.window.on_capture != "close":
+                self._exclude_children(True)  # open windows may cover the area meanwhile
+            QTimer.singleShot(int(delay * 1000), lambda: self._delayed_grab(rect))
         else:
             self._read(shot.crop(rect))
+
+    def _delayed_grab(self, rect: Rect) -> None:
+        try:
+            image = grab_rect(rect)
+        finally:
+            self._exclude_children(False)
+        self._read(image)
 
     def _read(self, image: Image.Image, engine: str | None = None,
               preset: str | None = None, retry: bool = False) -> None:
@@ -266,8 +448,10 @@ class JishoLens:
         if data.collect == "ask":
             from jisho_lens.ui.consent import ask_consent
 
-            data.collect = "yes" if ask_consent(self._window) else "no"
-            self.settings.save()
+            answer = ask_consent(self._window)
+            if answer is not None:  # None: closed by a new capture, ask again next time
+                data.collect = "yes" if answer else "no"
+                self.settings.save()
             log.info("OCR data collection: %s", data.collect)
         job, raw = outcome.job, outcome.raw.text  # raw OCR (with speaker line) for OCR data
         speaker = outcome.cleaned.speaker
@@ -348,6 +532,7 @@ class JishoLens:
             self._history_window.changed.connect(self._on_history_changed)
             self._history_window.setWindowIcon(app_icon())
             self._history_window.open_requested.connect(self.open_capture)
+            self._own(self._history_window)
         self._history_window.refresh()
         self._history_window.show()
         self._history_window.raise_()
@@ -490,6 +675,7 @@ class JishoLens:
     # ---------- settings ----------
     def open_settings(self) -> None:
         if self._settings_window is not None:
+            self._settings_window.show()  # may have been hidden by a capture
             self._settings_window.raise_()
             self._settings_window.activateWindow()
             return
@@ -499,8 +685,14 @@ class JishoLens:
         self._settings_window.applied.connect(self._apply_settings)
         self._settings_window.components_changed.connect(self._on_components_changed)
         self._settings_window.data_changed.connect(self._on_history_changed)
-        self._settings_window.finished.connect(lambda _: setattr(self, "_settings_window", None))
+        self._settings_window.finished.connect(self._settings_closed)
+        self._own(self._settings_window)
         self._settings_window.show()
+
+    def _settings_closed(self, _result: int) -> None:
+        if self._settings_window is not None:
+            self._settings_window.deleteLater()  # owned by the text window: free it
+        self._settings_window = None
 
     def _apply_settings(self, new: Settings) -> None:
         old = self.settings

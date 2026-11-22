@@ -57,3 +57,34 @@ def test_each_dictionary_is_removable_on_its_own(folder):
 def test_unknown_component(folder):
     with pytest.raises(components.ComponentError):
         components.install("nope")
+
+
+def test_long_commands_report_progress(tmp_path):
+    import subprocess
+    import sys
+
+    import pytest
+
+    from jisho_lens.components import manager
+
+    script = tmp_path / "fake_install.py"
+    out = tmp_path / "out"
+    script.write_text(
+        "import sys, time, pathlib\n"
+        f"out = pathlib.Path({str(out)!r}); out.mkdir()\n"
+        "for p in (10, 55, 100):\n"
+        "    sys.stdout.write(f'\\r{p}%|####|'); sys.stdout.flush()\n"
+        "    (out / f'{p}.bin').write_bytes(b'x' * 1024 * 1024)\n"
+        "    time.sleep(0.4)\n", encoding="utf-8")
+    seen = []
+    manager._run_with_progress([sys.executable, str(script)], "Installing", seen.append,
+                               watch=out, every=0.1)
+    assert seen and all(s.startswith("Installing… 0:0") for s in seen)
+    assert any("%" in s for s in seen) and any("MB written" in s for s in seen)
+    assert any("55%" in s or "100%" in s for s in seen)
+
+    bad = tmp_path / "bad.py"
+    bad.write_text("import sys; print('boom'); sys.exit(3)", encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError) as err:
+        manager._run_with_progress([sys.executable, str(bad)], "x", seen.append, every=0.1)
+    assert "boom" in err.value.output
