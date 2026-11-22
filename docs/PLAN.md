@@ -127,11 +127,29 @@ Phase 3 notes (2026-11-21):
 - **Components (2026-11-22):** UniDic-lite, full UniDic, JMdict, KANJIDIC2 and Wiktionary are now optional components, none installed by default (word splitting defaults to None = plain text). Each installs into its own folder (`data/components/` from source): UniDic via `pip --target`, each dictionary into its own SQLite file. Dictionaries can only be installed while a UniDic is installed and are removed with the last UniDic. Settings → Components has Install/Remove buttons (background work with progress); `tools/components.py` does the same from the command line and replaces `tools/build_dictionary.py`. The Wiktionary word-splitter list is rebuilt when a UniDic, Wiktionary or JMdict is installed or removed, and leaves out JMdict words while JMdict is installed (including them changed ~19% of sample sentences instead of ~1.4%). Removal works while the app has the files open (MeCab/SQLite are released first). Tests: `tests/test_components.py` (75 tests total).
 
 
-## Phase 4 — History
+## Phase 4 — History and OCR data collection
+
+**History** (core):
 - [ ] `history.db` + saved capture images.
 - [ ] History screen: list with thumbnails, open in main window, delete, retention setting.
 
-Done when: past captures can be browsed and reopened.
+**OCR data collection** (to improve OCR accuracy for this copy of the app) — **off by default, opt-in only**:
+- [ ] Ask once (first capture after install/update): "Allow Jisho Lens to keep your captures and corrections to improve OCR accuracy for your copy of the app? The data stays on this computer. Nothing is sent anywhere unless you export it and share it yourself." Buttons: Allow / Don't allow. The answer is saved; changeable any time in Settings ("Collect OCR data", off by default), with a "Delete collected data" button.
+- [ ] When allowed, each capture keeps: the screenshot crop, the OCR result, engine / image setting / time taken, text type, game name (optional), screen resolution and scaling. Not kept: anything outside the selected area, user names, file paths.
+- [ ] **Edit** saves the corrected text as the right answer; a **Correct ✓** button marks OCR output as right without edits. Only checked samples (✓ or edited) count for accuracy.
+- [ ] Collected samples are separate from History retention (deleting old history doesn't delete collected samples, and vice versa).
+
+**Export / import / merge** (sharing between users is manual and opt-in):
+- [ ] **Export** a data pack (`.zip`): all, checked only, or one game; shows the crops before writing (screenshots can contain player names or chat). Includes a manifest (format version, app version, counts) and an anonymous random contributor ID, no personal details.
+- [ ] **Import** a pack: validate (only images + JSON, size limits, no unsafe paths), add to the local set.
+- [ ] **Merge / append** packs: duplicates detected by image content hash; different corrections of the same image kept side by side and flagged for review.
+- [ ] Export to the OCR test-set format (`tests/ocr_set/images/`) and run `tools/ocr_bench.py` on it: best engine and image setting per text type.
+- [ ] Command-line tools for export / import / merge, plus buttons in the History screen.
+- [ ] Words people corrected (names, game terms) can be offered to the word splitter's list (later).
+
+Notes: no automatic collection from other users and no server; packs are shared privately (game screenshots are the publisher's copyrighted material).
+
+Done when: past captures can be browsed and reopened; with consent given, captures and corrections are kept locally, and packs can be exported, imported, merged and benchmarked.
 
 ## Phase 5 — Translation (DeepL)
 Built as ordinary code, like the Dictionary; Phase 7 turns it into a module.

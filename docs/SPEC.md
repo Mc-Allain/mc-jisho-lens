@@ -120,6 +120,11 @@ With no UniDic installed there is no word splitting: the window shows plain OCR 
 - Open a capture back in the main window; delete one or all.
 - Retention setting (e.g. keep last N captures or N days).
 
+**OCR data collection (opt-in, off by default)**
+- The app asks once whether it may keep captures and corrections to improve OCR accuracy for the user's own copy, and states that the data stays on this computer and is never sent anywhere unless the user exports and shares it. The choice can be changed in Settings, and collected data can be deleted there.
+- When allowed: the screenshot crop, OCR result, settings used, timing, text type, and the corrected text (Edit) or a "Correct ✓" confirmation are stored locally.
+- Users can export data packs, and import and merge packs from others (manual file sharing only; duplicates merged by image hash). The combined set feeds the OCR benchmark to choose engines and image settings. Details in PLAN Phase 4.
+
 **Settings**
 - General: hotkey, start with Windows, window behaviour, theme.
 - OCR: engine, preprocessing defaults, CPU/GPU.
