@@ -212,12 +212,20 @@ class SettingsWindow(QDialog):
         keep = self._history.favorite_sample_ids() if self._history is not None else set()
         n = store.stats()["samples"]
         kept = f"\n\n{len(keep)} samples of favorites are kept." if keep else ""
-        if QMessageBox.question(
-                self, "Delete collected data",
-                f"Delete all {n} collected OCR samples (corrected ones too) and the learned "
+        text = (f"Delete all {n} collected OCR samples (corrected ones too) and the learned "
                 "corrections from this computer?\n\n"
-                f"History is kept. This can't be undone.{kept}",
-                defaultButton=QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                f"History is kept. This can't be undone.{kept}")
+        fixes = store.fix_count(keep)
+        if fixes:  # your own corrections: type to confirm
+            from jisho_lens.ui.confirm_dialog import confirm_delete, fixes_note
+
+            ok = confirm_delete(self, "Delete collected data",
+                                f"{text}\n\n{fixes_note(fixes)}")
+        else:
+            ok = QMessageBox.question(
+                self, "Delete collected data", text,
+                defaultButton=QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+        if ok:
             store.delete_all(keep)
             if self._corrections is not None:
                 self._corrections.delete_all()

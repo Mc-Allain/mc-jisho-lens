@@ -407,13 +407,18 @@ class HistoryWindow(QWidget):
 
     def _clear_all(self) -> None:
         st = self.data.stats()
-        if QMessageBox.question(
-                self, "Clear all",
-                f"Delete all History captures, all {st['samples']} collected OCR samples "
+        text = (f"Delete all History captures, all {st['samples']} collected OCR samples "
                 f"(including {st['checked']} corrected or ✓ ones) and the learned "
                 f"corrections from this computer?\n\nThis can't be undone."
-                f"{self._kept_note()}",
-                defaultButton=QMessageBox.StandardButton.No) \
+                f"{self._kept_note()}")
+        fixes = self.data.fix_count(self.history.favorite_sample_ids())
+        if fixes:  # your own corrections: type to confirm
+            from jisho_lens.ui.confirm_dialog import confirm_delete, fixes_note
+
+            if not confirm_delete(self, "Clear all", f"{text}\n\n{fixes_note(fixes)}"):
+                return
+        elif QMessageBox.question(self, "Clear all", text,
+                                  defaultButton=QMessageBox.StandardButton.No) \
                 != QMessageBox.StandardButton.Yes:
             return
         captures, samples, kept = clear_all(self.history, self.data,

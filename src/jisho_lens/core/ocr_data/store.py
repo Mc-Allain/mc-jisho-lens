@@ -455,6 +455,10 @@ class OcrDataStore:
     def categories(self) -> list[str]:
         return sorted({s.category for s in self.all() if s.category}, key=str.lower)
 
+    def fix_count(self, keep: set[str] = frozenset()) -> int:
+        """Samples fixed with Edit outside `keep`: what a delete-all would lose."""
+        return sum(1 for s in self.all() if s.is_fix and s.id not in keep)
+
     def delete_all(self, keep: set[str] = frozenset()) -> int:
         """Delete every sample except the ids in `keep` (favorites). Returns deletions."""
         if not keep:

@@ -555,8 +555,15 @@ class DataManagerWindow(QDialog):
         if not go:
             QMessageBox.information(self, "Delete", text)
             return
-        if QMessageBox.question(self, "Delete", text + "\n\nThis can't be undone.",
-                                defaultButton=QMessageBox.StandardButton.No) \
+        fixes = sum(1 for s in go if s.is_fix)
+        if fixes:  # your own corrections: type to confirm
+            from jisho_lens.ui.confirm_dialog import confirm_delete, fixes_note
+
+            if not confirm_delete(self, "Delete",
+                                  f"{text}\n\n{fixes_note(fixes)} This can't be undone."):
+                return
+        elif QMessageBox.question(self, "Delete", text + "\n\nThis can't be undone.",
+                                  defaultButton=QMessageBox.StandardButton.No) \
                 != QMessageBox.StandardButton.Yes:
             return
         for s in go:
