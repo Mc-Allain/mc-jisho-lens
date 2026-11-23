@@ -145,6 +145,10 @@ class OcrDataStore:
         self.samples_dir = self.folder / "samples"
         self._lock = threading.Lock()
         self._cache: list[Sample] | None = None  # all samples, dropped on every change
+        self.version = 0  # goes up with every change to the samples
+        # goes up only with changes that can affect a fix (an answer or name saved, a
+        # sample with an answer deleted, everything deleted); not for new captures
+        self.fix_version = 0
         from jisho_lens.core.ocr_data.provenance import Provenance
 
         self.provenance = Provenance(self.folder)  # pack names, imports, "Using:" label
@@ -202,7 +206,11 @@ class OcrDataStore:
         }
 
     # ---------- write ----------
-    def save(self, sample: Sample, png: bytes | None = None) -> None:
+    def save(self, sample: Sample, png: bytes | None = None,
+             fix_change: bool | None = None) -> None:
+        """Write a sample. `fix_change`: whether this can change a fix (default: the
+        sample has an answer); it moves `fix_version`, which learned corrections are
+        checked against."""
         with self._lock:
             self.samples_dir.mkdir(parents=True, exist_ok=True)
             if png is not None and not self.png_path(sample.id).exists():
@@ -210,6 +218,9 @@ class OcrDataStore:
             (self.samples_dir / f"{sample.id}.json").write_text(sample.to_json(),
                                                                encoding="utf-8")
             self._cache = None
+            self.version += 1
+            if sample.truth is not None if fix_change is None else fix_change:
+                self.fix_version += 1
 
     def find_text(self, text: str, shown: str | None = None) -> Sample | None:
         """A sample of the same sentence: its OCR text or its right answer equals `text`.
@@ -268,9 +279,11 @@ class OcrDataStore:
         sid = sample_id(png)
         existing = self.get(sid)
         if existing is not None:
+            # a fix change only if the reading changed (corrections learn OCR -> answer)
+            reread = (existing.ocr_text, existing.speaker) != (ocr_text, speaker)
             existing.ocr_text, existing.engine, existing.preset = ocr_text, engine, preset
             existing.seconds, existing.speaker = seconds, speaker
-            self.save(existing)
+            self.save(existing, fix_change=reread and existing.truth is not None)
             return sid
         same = self.find_text(ocr_text, shown)
         if same is not None:
@@ -341,10 +354,14 @@ class OcrDataStore:
         return sum(p.stat().st_size for p in self.samples_dir.iterdir() if p.is_file())
 
     def delete(self, sid: str) -> None:
+        had_answer = (s := self.get(sid)) is not None and s.truth is not None
         with self._lock:
             for ext in ("png", "json"):
                 (self.samples_dir / f"{sid}.{ext}").unlink(missing_ok=True)
             self._cache = None
+            self.version += 1
+            if had_answer:
+                self.fix_version += 1
 
     def enforce_limit(self, max_bytes: int, keep: set[str] = frozenset()) -> int:
         """Delete the oldest unchecked samples until the data fits in `max_bytes`.
@@ -433,7 +450,7 @@ class OcrDataStore:
         sample = self.get(sid)
         if sample is not None and sample.category != category:
             sample.category = category
-            self.save(sample)
+            self.save(sample, fix_change=False)
 
     def categories(self) -> list[str]:
         return sorted({s.category for s in self.all() if s.category}, key=str.lower)
@@ -446,6 +463,8 @@ class OcrDataStore:
                 if self.samples_dir.exists():
                     shutil.rmtree(self.samples_dir)
                 self._cache = None
+                self.version += 1
+                self.fix_version += 1
             self.provenance.clear_imports()
             return n
         n = 0

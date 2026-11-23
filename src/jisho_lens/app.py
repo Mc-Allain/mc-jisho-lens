@@ -141,6 +141,8 @@ class JishoLens:
         self.corrections = CorrectionStore()
         self._ocr_lines: list[str] | None = None  # text as OCR read it, before corrections
         self._ocr_speaker: str | None = None  # the speaker's name as OCR read it
+        self._undone = False  # Undo shows what OCR read; not saved until Save Undo
+        self._fixed_view = None  # what Undo Fix replaced, for Redo Fix
         self._applied: list = []  # corrections used on the text on screen
         if self.settings.data.collecting and not self.corrections.path.exists():
             self._learn_from_samples()
@@ -204,6 +206,7 @@ class JishoLens:
             w.confirm_requested.connect(self._on_confirm)
             w.history_requested.connect(self.open_history)
             w.undo_corrections_requested.connect(self._undo_corrections)
+            w.redo_corrections_requested.connect(self._redo_corrections)
             w.favorite_toggled.connect(self._on_favorite)
             w.geometry_changed.connect(self._save_geometry)
             self._window = w
@@ -464,6 +467,8 @@ class JishoLens:
         preset = preset or self.settings.ocr.preset
         self.window.set_engine_preset(engine, preset)
         self.window.show_busy(f"Reading… ({engine})")
+        self._undone = False
+        self._fixed_view = None
         self.window.set_corrections(0)
         self._applied = []
         self.tray.setIcon(app_icon(busy=True))
@@ -501,6 +506,7 @@ class JishoLens:
             analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
             status += " · Your fix from earlier"
         elif self.settings.data.collecting:
+            self._prune_corrections()  # only corrections whose fix still exists
             try:
                 result = self.corrections.apply(lines)
             except Exception:  # noqa: BLE001
@@ -612,19 +618,42 @@ class JishoLens:
             self._history_window.refresh()
 
     def _update_confirm(self) -> None:
+        """✓ Saved only when what the window shows (text and name) is the saved answer."""
         sample = self.ocr_data.get(self._sample_id) if self._sample_id else None
-        self.window.set_collecting(sample is not None,
-                                   confirmed=bool(sample and sample.checked))
+        saved = bool(sample and sample.checked
+                     and sample.answer_lines() == list(self.window._lines)
+                     and (sample.shown_speaker or None) == (self.window._speaker or None))
+        self.window.set_collecting(sample is not None, confirmed=saved,
+                                   undone=self._undone)
 
     def _on_confirm(self) -> None:
-        if self._sample_id:
-            self.ocr_data.set_truth(self._sample_id, self.window.text(), "confirmed")
-            if self._applied:  # kept the OCR text after Undo: those corrections were wrong
-                self.corrections.forget(self._applied, self.window._lines)
-                self._applied = []
-            self.window.status_label.setText("Saved as correct ✓")
-            self._update_confirm()
-            self._update_data_label()
+        """✓ Correct / Save Undo: what the window shows (text and name) is the right
+        answer. History and later captures follow; corrections from a replaced fix go."""
+        if not self._sample_id:
+            return
+        undone = self._undone
+        text, speaker = self.window.text(), self.window._speaker or None
+        sample = self.ocr_data.get(self._sample_id)
+        self.ocr_data.set_truth(self._sample_id, text, "confirmed")
+        if sample is not None and speaker != (sample.shown_speaker or None):
+            self.ocr_data.set_speaker(self._sample_id, speaker)
+        if self._capture_id is not None:
+            self.history.set_edited(self._capture_id, text)
+            self.history.set_speaker(self._capture_id, speaker)
+        self.history.sync_text(self._sample_id, text, except_id=self._capture_id)
+        self.history.sync_speaker(self._sample_id, speaker, except_id=self._capture_id)
+        if self._applied:  # kept the OCR text after Undo: those corrections were wrong
+            self.corrections.forget(self._applied, self.window._lines)
+            self._applied = []
+        self._undone = False
+        self._fixed_view = None  # the fix is replaced: nothing to redo
+        self.window.set_corrections(0)
+        self._prune_corrections()  # a replaced fix: its learned corrections go
+        self.window.status_label.setText("Undo saved ✓" if undone else "Saved as correct ✓")
+        self._update_confirm()
+        self._update_data_label()
+        if self._history_window is not None:
+            self._history_window.refresh()
 
     def open_history(self) -> None:
         from jisho_lens.ui.history_window import HistoryWindow
@@ -678,9 +707,17 @@ class JishoLens:
 
     def _prune_corrections(self) -> None:
         """Learned corrections whose sample was deleted or whose fix changed are forgotten
-        (they are never applied once their fix is gone)."""
+        (they are never applied once their fix is gone). Runs before every capture uses
+        them, whatever changed the data; skipped unless a fix-related change happened
+        since last time (OcrDataStore.fix_version: not new captures, not categories)."""
+        version = (id(self.ocr_data), self.ocr_data.fix_version,
+                   len(self.corrections.all()))
+        if version == getattr(self, "_pruned_at", None):
+            return
         try:
             gone = self.corrections.prune(self.ocr_data.all())
+            self._pruned_at = (id(self.ocr_data), self.ocr_data.fix_version,
+                               len(self.corrections.all()))
             if gone:
                 log.info("forgot %d learned corrections without their fix", gone)
         except Exception:  # noqa: BLE001
@@ -723,6 +760,8 @@ class JishoLens:
         if capture is None:
             return
         self._capture_id, self._sample_id = capture.id, capture.sample_id
+        self._undone = False
+        self._fixed_view = None
         self._ocr_lines, self._applied = None, []
         self.window.set_corrections(0)
         if self._sample_id and self.ocr_data.get(self._sample_id) is None:
@@ -745,6 +784,8 @@ class JishoLens:
         self.window.show_text(lines, analysis.tokens, speaker, status, analysis.dictionary)
 
     def _on_text_edited(self, lines: list[str], speaker: str | None = None) -> None:
+        self._undone = False
+        self._fixed_view = None
         before = list(self.window._lines)  # the text as shown before this edit
         old_speaker = self.window._speaker or None
         a = self.settings.analysis
@@ -765,16 +806,32 @@ class JishoLens:
             # other captures of the same sentence show the corrected text too
             self.history.sync_text(self._sample_id, text, except_id=self._capture_id)
             status = "Edited · correction saved"
-            if self.settings.data.collecting and lines != before:
+            sample = self.ocr_data.get(self._sample_id)
+            if self.settings.data.collecting and lines != before and sample is not None:
+                # learn from what OCR read -> your answer (not from what was shown: going
+                # back to the OCR text is no fix and must not teach a reverse correction)
                 try:
-                    learned = self.corrections.learn(before, lines, self._applied,
-                                                     sample_id=self._sample_id)
+                    learned = self.corrections.learn(
+                        sample.ocr_lines(), sample.answer_lines() if sample.is_fix else
+                        sample.ocr_lines(), self._applied, sample_id=self._sample_id)
                 except Exception:  # noqa: BLE001
                     log.exception("learning corrections failed")
                     learned = 0
-                if learned:
+                if learned and sample.is_fix:
                     status += " · will be fixed in later captures"
+                elif not sample.is_fix:
+                    status = "Edited · same as OCR read (no fix)"
+            elif self.settings.data.collecting and self._applied:
+                # unchanged from what was shown, e.g. Save Edit after Undo Fix: corrections whose
+                # OCR mistake is kept were wrong, like Save Undo
+                try:
+                    self.corrections.forget(self._applied, lines)
+                except Exception:  # noqa: BLE001
+                    log.exception("forgetting corrections failed")
+            if sample is not None and not sample.is_fix:
+                status = "Edited · same as OCR read (no fix)"
             self._applied = []
+            self._prune_corrections()  # corrections whose fix this edit undid go
             self.window.status_label.setText(status)
         self._update_confirm()
         self._update_data_label()  # editing a pack's sample makes that pack partial
@@ -824,14 +881,32 @@ class JishoLens:
             log.exception("learning from saved samples failed")
 
     def _undo_corrections(self) -> None:
-        """Show the text as OCR read it, without the corrections applied to it."""
+        """Undo Fix: show the text and name as OCR read them (nothing is saved). Redo Fix
+        shows the fix again; Save Undo keeps what OCR read."""
         if self._ocr_lines is None:
             return
+        w = self.window
+        self._fixed_view = (list(w._lines), w._tokens, w._speaker, w.status_label.text(),
+                            w._dictionary, list(self._applied))
         a = self.settings.analysis
         analysis = analyze_text(self._ocr_lines, a.word_splitting, a.dictionary_active)
         self._show_analysis(self._ocr_lines, analysis, self._ocr_speaker,
-                            "As OCR read it · Edit to fix, or ✓ if it's right")
-        self.window.set_corrections(0)
+                            "As OCR read it · Redo Fix shows your fix, Save Undo keeps this")
+        self._undone = True
+        self.window.set_corrections(0, redo=True)
+        self._update_confirm()
+
+    def _redo_corrections(self) -> None:
+        """Redo Fix: show the fix again, exactly as before Undo Fix."""
+        if self._fixed_view is None:
+            return
+        lines, tokens, speaker, status, dictionary, applied = self._fixed_view
+        self._fixed_view = None
+        self.window.show_text(lines, tokens, speaker, status, dictionary)
+        self._applied = applied
+        self._undone = False
+        self.window.set_corrections(max(1, len(applied)))
+        self._update_confirm()
 
     def _check_word_splitting(self) -> bool:
         """Fall back to plain text when the selected UniDic isn't installed. True if changed."""

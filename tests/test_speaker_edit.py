@@ -162,7 +162,7 @@ def test_window_edit_mode_speaker_box(qapp):
     assert edits == []
     w.edit_btn.click()
     w.speaker_edit.setText("  リリカ ")
-    w.edit_btn.click()  # Done: name-only change is saved
+    w.edit_btn.click()  # Save Edit: name-only change is saved
     assert edits == [(["わたしたち"], "リリカ")]
     w.show_text(["わたしたち"], [], "リリカ", "x")
     w.edit_btn.click()
@@ -170,7 +170,7 @@ def test_window_edit_mode_speaker_box(qapp):
     w.edit_btn.click()  # removing the name
     assert edits[-1] == (["わたしたち"], None)
     w.edit_btn.click()
-    w.edit_btn.click()  # Done without changes: nothing emitted
+    w.edit_btn.click()  # Save Edit without changes: nothing emitted
     assert len(edits) == 2
     w.close()
 

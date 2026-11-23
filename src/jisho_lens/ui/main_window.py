@@ -6,7 +6,7 @@ furigana sits over kanji, and a romaji line can be shown under each line.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QFont,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QWidgetItem,
 )
 
 from jisho_lens.core.analysis import Token
@@ -40,7 +42,7 @@ from jisho_lens.ui.winapi import exclude_from_capture
 # the dark window). Checked toggles (Furigana, Romaji, ★ Favorite, Edit while editing) fill.
 BUTTON_COLORS = {
     "capture": "#4a8fe7",  # Re-capture, Retry: read the text again
-    "edit": "#e0a030",  # Edit / Done
+    "edit": "#e0a030",  # Edit / Save Edit
     "copy": "#3fb6a8",
     "confirm": "#5cbf6a",  # ✓ Correct
     "favorite": "#e8c547",
@@ -111,6 +113,125 @@ def _divider() -> QFrame:
     return line
 
 
+class GroupFlow(QLayout):
+    """Groups of controls in a row that wrap to more rows when the window is too narrow.
+    A group never splits, and its divider shows only between groups on the same row."""
+
+    SPACING = 6
+
+    def __init__(self, groups: list[tuple], align_right: bool = False) -> None:
+        super().__init__()
+        self.setContentsMargins(0, 0, 0, 0)
+        self._align_right = align_right
+        self.changed = None  # called when a group's size changes (a button shown/hidden)
+        self._items = []  # (divider item or None, group item)
+        for i, group in enumerate(groups):
+            box = QWidget()
+            row = QHBoxLayout(box)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(self.SPACING)
+            for w in group:
+                if w == "gap":
+                    row.addSpacing(self.SPACING)
+                else:
+                    row.addWidget(w)
+            divider = None
+            if i:
+                self.addChildWidget(line := _divider())
+                divider = QWidgetItem(line)
+            self.addChildWidget(box)
+            self._items.append((divider, QWidgetItem(box)))
+
+    # ---- QLayout
+    def addItem(self, item) -> None:  # noqa: N802
+        raise NotImplementedError("GroupFlow takes its groups in the constructor")
+
+    def count(self) -> int:
+        return sum(1 + (d is not None) for d, _g in self._items)
+
+    def itemAt(self, index: int):  # noqa: N802
+        flat = [x for d, g in self._items for x in (d, g) if x is not None]
+        return flat[index] if 0 <= index < len(flat) else None
+
+    def takeAt(self, index: int):  # noqa: N802
+        return None
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._place(QRect(0, 0, width, 0), apply=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.one_row_width(), self._place(QRect(0, 0, 10**6, 0), apply=False))
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        widest = max((g.sizeHint().width() for _d, g in self._shown()), default=0)
+        return QSize(widest, self._place(QRect(0, 0, widest, 0), apply=False))
+
+    def invalidate(self) -> None:
+        super().invalidate()
+        if getattr(self, "changed", None) is not None:
+            self.changed()
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._place(rect, apply=True)
+
+    # ---- placing
+    def _shown(self):
+        return [(d, g) for d, g in self._items if not g.widget().isHidden()]
+
+    def one_row_width(self) -> int:
+        """The width everything needs on one row."""
+        shown = self._shown()
+        width = sum(g.sizeHint().width() for _d, g in shown)
+        for i, (d, _g) in enumerate(shown):
+            if i and d is not None:
+                width += d.sizeHint().width() + 2 * self.SPACING
+            elif i:
+                width += self.SPACING
+        return width
+
+    def _place(self, rect: QRect, apply: bool) -> int:
+        """Lay the groups out in `rect` (or only measure); returns the height used."""
+        rows, row, used = [], [], 0
+        for d, g in self._shown():
+            w = g.sizeHint().width()
+            lead = (d.sizeHint().width() + 2 * self.SPACING) if d is not None else self.SPACING
+            if row and used + lead + w > rect.width():
+                rows.append(row)
+                row, used = [], 0
+            row.append((d, g, lead if row else 0, w))
+            used += (lead if len(row) > 1 else 0) + w
+        if row:
+            rows.append(row)
+        y = rect.y()
+        hidden = {id(d) for d, _g in self._items if d is not None}
+        for n, row in enumerate(rows):
+            height = max(g.sizeHint().height() for _d, g, _l, _w in row)
+            width = sum(lead + w for _d, _g, lead, w in row)
+            x = rect.x() + (rect.width() - width if self._align_right else 0)
+            for d, g, lead, w in row:
+                if lead and d is not None:
+                    dw = d.sizeHint().width()
+                    if apply:
+                        d.setGeometry(QRect(x + self.SPACING, y, dw, height))
+                    hidden.discard(id(d))
+                if apply:
+                    g.setGeometry(QRect(QPoint(x + lead, y), QSize(w, height)))
+                x += lead + w
+            y += height + (self.SPACING if n < len(rows) - 1 else 0)
+        if apply:  # dividers at the start of a row (or of hidden groups) aren't drawn
+            for d, _g in self._items:
+                if d is not None and id(d) in hidden:
+                    d.setGeometry(QRect())
+        return y - rect.y()
+
+
 class ElideLabel(QLabel):
     """A one-line label that shortens its text with … when the window is narrow (the full
     text is in the hover text)."""
@@ -146,6 +267,7 @@ class MainWindow(QWidget):
     history_requested = Signal()
     favorite_toggled = Signal(bool)  # star the whole phrase (History capture)
     undo_corrections_requested = Signal()  # show what OCR read before my corrections
+    redo_corrections_requested = Signal()  # show the fix again
     text_edited = Signal(list, object)  # new lines, speaker's name (None = no speaker)
     geometry_changed = Signal(list)
     display_changed = Signal(bool, bool)  # furigana, romaji
@@ -185,11 +307,17 @@ class MainWindow(QWidget):
         top.addSpacing(8)
         top.addWidget(self.data_label, 1)
         top.addWidget(self.status_label)
-        self.undo_btn = QPushButton("Undo")
-        self.undo_btn.setToolTip("Show the text as OCR read it, without your earlier corrections")
+        self.undo_btn = QPushButton("Undo Fix")
+        self.undo_btn.setToolTip("Show the text as OCR read it, without your earlier fixes "
+                                 "(nothing is saved; Redo Fix brings them back)")
         self.undo_btn.setVisible(False)
         self.undo_btn.clicked.connect(self.undo_corrections_requested)
         top.addWidget(self.undo_btn)
+        self.redo_btn = QPushButton("Redo Fix")
+        self.redo_btn.setToolTip("Show your fix again")
+        self.redo_btn.setVisible(False)
+        self.redo_btn.clicked.connect(self.redo_corrections_requested)
+        top.addWidget(self.redo_btn)
         top.addWidget(_divider())  # display options
         top.addWidget(self.furigana_btn)
         top.addWidget(self.romaji_btn)
@@ -262,29 +390,24 @@ class MainWindow(QWidget):
         self.settings_btn = QPushButton("Settings")
         # bottom bar: actions on the left, OCR controls on the right; on a narrow window the
         # OCR controls wrap to a second row (see _fit_bottom_bar)
+        # groups: capture | the text | keeping it (OCR data, favorites, History); a group
+        # that doesn't fit goes to the next row (no overlapping buttons on a narrow window)
         self.actions_bar = QWidget()
-        actions = QHBoxLayout(self.actions_bar)
-        actions.setContentsMargins(0, 0, 0, 0)
-        # groups: capture | the text | keeping it (OCR data, favorites, History)
-        for group in ((self.recapture_btn,), (self.edit_btn, self.cancel_edit_btn, self.copy_btn),
-                      (self.confirm_btn, self.favorite_btn, self.history_btn)):
-            if actions.count():
-                actions.addWidget(_divider())
-            for w in group:
-                actions.addWidget(w)
-        actions.addStretch(1)
-        self.ocr_bar = QWidget()
-        ocr = QHBoxLayout(self.ocr_bar)
-        ocr.setContentsMargins(0, 0, 0, 0)
-        ocr.addStretch(1)
+        self.actions_flow = GroupFlow([
+            (self.recapture_btn,), (self.edit_btn, self.cancel_edit_btn, self.copy_btn),
+            (self.confirm_btn, self.favorite_btn, self.history_btn)])
+        self.actions_bar.setLayout(self.actions_flow)
         # groups: reading again (engine, image filter, Retry) | settings
-        for w in (engine_label, self.engine_box):
-            ocr.addWidget(w)
-        ocr.addSpacing(6)
-        for w in (preset_label, self.preset_box, self.retry_btn):
-            ocr.addWidget(w)
-        ocr.addWidget(_divider())
-        ocr.addWidget(self.settings_btn)
+        self.ocr_bar = QWidget()
+        self.ocr_flow = GroupFlow([
+            (engine_label, self.engine_box, "gap", preset_label, self.preset_box,
+             self.retry_btn), (self.settings_btn,)], align_right=True)
+        self.ocr_bar.setLayout(self.ocr_flow)
+        self._fit_timer = QTimer(self)  # one row or two, again after buttons show/hide
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(0)
+        self._fit_timer.timeout.connect(self._fit_bottom_bar)
+        self.actions_flow.changed = self.ocr_flow.changed = self._fit_timer.start
         self.bottom = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.bottom.addWidget(self.actions_bar, 1)
         self.bottom.addWidget(self.ocr_bar)
@@ -299,13 +422,14 @@ class MainWindow(QWidget):
             "cancel": (self.cancel_edit_btn,),
             "copy": (self.copy_btn,), "confirm": (self.confirm_btn,),
             "favorite": (self.favorite_btn,), "history": (self.history_btn,),
-            "undo": (self.undo_btn,), "display": (self.furigana_btn, self.romaji_btn),
+            "undo": (self.undo_btn, self.redo_btn),
+            "display": (self.furigana_btn, self.romaji_btn),
             "settings": (self.settings_btn,),
         }
         # every text a button can show (its width must fit the widest one, in bold)
-        texts = {self.edit_btn: ("Edit", "Done"),
+        texts = {self.edit_btn: ("Edit", "Save Edit"),
                  self.favorite_btn: ("☆ Favorite", "★ Favorite"),
-                 self.confirm_btn: ("✓ Correct", "✓ Saved")}
+                 self.confirm_btn: ("✓ Correct", "✓ Saved", "Save Undo")}
         for role, buttons in roles.items():
             for b in buttons:
                 b.setProperty("role", role)
@@ -399,11 +523,24 @@ class MainWindow(QWidget):
             f"setOpt('furi', {str(furi).lower()}); setOpt('romaji', {str(rom).lower()});")
         self.display_changed.emit(furi, rom)
 
-    def set_collecting(self, collecting: bool, confirmed: bool = False) -> None:
-        """Show ✓ Correct only while OCR data collection is on for the shown capture."""
+    def set_collecting(self, collecting: bool, confirmed: bool = False,
+                       undone: bool = False) -> None:
+        """The ✓ button, shown only while OCR data collection is on for the capture:
+        "✓ Saved" (disabled) when the text and name shown are what's saved; "Save Undo"
+        after Undo (the text as OCR read it isn't saved yet); otherwise "✓ Correct"."""
+        self._undone = collecting and undone  # Save Edit then saves even without changes
         self.confirm_btn.setVisible(collecting)
         self.confirm_btn.setEnabled(collecting and not confirmed)
-        self.confirm_btn.setText("✓ Saved" if confirmed else "✓ Correct")
+        if confirmed:
+            text, tip = "✓ Saved", "The text and name shown are saved as the right answer"
+        elif undone:
+            text, tip = ("Save Undo", "Save the text and name as OCR read them as the right "
+                         "answer (your earlier fix is replaced)")
+        else:
+            text, tip = ("✓ Correct", "OCR read this correctly: keep it as a checked sample "
+                         "(only when OCR data collection is on)")
+        self.confirm_btn.setText(text)
+        self.confirm_btn.setToolTip(tip)
 
     def set_favorite(self, available: bool, favorite: bool = False) -> None:
         """Show the star while the text on screen is a History capture."""
@@ -420,9 +557,11 @@ class MainWindow(QWidget):
         self.data_label.set_full_text(text)
         self.data_label.setToolTip(details)
 
-    def set_corrections(self, count: int) -> None:
-        """Show Undo while the text has `count` > 0 of the user's earlier corrections."""
-        self.undo_btn.setVisible(count > 0)
+    def set_corrections(self, count: int, redo: bool = False) -> None:
+        """Undo Fix while the text has `count` > 0 of your earlier fixes; Redo Fix (instead)
+        after Undo Fix, while the fix can be shown again."""
+        self.undo_btn.setVisible(count > 0 and not redo)
+        self.redo_btn.setVisible(redo)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.retry_btn,
@@ -432,7 +571,7 @@ class MainWindow(QWidget):
     # ---------- edit / copy ----------
     @staticmethod
     def _set_active(button: QPushButton, active: bool) -> None:
-        """Filled look for a button that is "on" without being checkable (Edit → Done)."""
+        """Filled look for a button that is "on" without being checkable (Edit → Save Edit)."""
         button.setProperty("active", "true" if active else "false")
         button.style().unpolish(button)
         button.style().polish(button)
@@ -451,7 +590,7 @@ class MainWindow(QWidget):
             self.editor.setPlainText(self.text())
             self.speaker_edit.setText(self._speaker or "")
             self.stack.setCurrentWidget(self.edit_page)
-            self.edit_btn.setText("Done")
+            self.edit_btn.setText("Save Edit")
             self.edit_btn.setToolTip("Save the edited text")
             self._set_active(self.edit_btn, True)
             self.cancel_edit_btn.setVisible(True)
@@ -470,7 +609,9 @@ class MainWindow(QWidget):
             new_lines = [ln.strip() for ln in self.editor.toPlainText().splitlines()
                          if ln.strip()]
             speaker = " ".join(self.speaker_edit.text().split()) or None
-            if new_lines != self._lines or speaker != (self._speaker or None):
+            # after Undo Fix the shown text isn't saved yet: Save Edit keeps it (like Save Undo)
+            if (new_lines != self._lines or speaker != (self._speaker or None)
+                    or getattr(self, "_undone", False)):
                 # the app re-analyzes and calls show_text
                 self.text_edited.emit(new_lines, speaker)
 
@@ -513,8 +654,8 @@ class MainWindow(QWidget):
         """One row when everything fits, otherwise the OCR controls go to a second row."""
         m = self.layout().contentsMargins()
         room = self.width() - m.left() - m.right()
-        need = (self.actions_bar.minimumSizeHint().width() + self.bottom.spacing()
-                + self.ocr_bar.minimumSizeHint().width())
+        need = (self.actions_flow.one_row_width() + self.bottom.spacing()
+                + self.ocr_flow.one_row_width())
         direction = (QBoxLayout.Direction.LeftToRight if room >= need
                      else QBoxLayout.Direction.TopToBottom)
         if self.bottom.direction() != direction:
