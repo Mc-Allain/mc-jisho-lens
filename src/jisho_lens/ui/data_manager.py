@@ -32,17 +32,16 @@ from jisho_lens.core.ocr_data.store import OcrDataStore, Sample
 from jisho_lens.ui.pack_review import (
     _HTML,
     CategoryBox,
-    _esc,
     _HtmlDelegate,
-    diff_html,
     plain_tooltip,
+    sample_html,
 )
 
 THUMB = QSize(180, 50)
 (COL_TICK, COL_PICTURE, COL_OCR, COL_ANSWER, COL_STATUS, COL_SOURCE, COL_CATEGORY,
  COL_CREATED, COL_HISTORY) = range(9)
 ALL, OWN, NONE = None, "\x00own", "\x00none"
-STATUS = {"edited": "Fixed with Edit", "confirmed": "✓ Correct", None: "Not checked"}
+STATUS = {"edited": "Fixed with Edit", "same": "Same as OCR", "none": "Not checked"}
 
 
 def _when(created: float) -> str:
@@ -52,7 +51,8 @@ def _when(created: float) -> str:
 
 
 def _status(s: Sample) -> str:
-    return STATUS.get(s.truth_source if s.truth is not None else None, "Not checked")
+    """Fixed with Edit / Same as OCR (✓, or an Edit that changed nothing) / Not checked."""
+    return STATUS[s.state]
 
 
 class EditAnswersDialog(QDialog):
@@ -63,7 +63,8 @@ class EditAnswersDialog(QDialog):
                  parent=None) -> None:
         super().__init__(parent)
         self.store, self.samples, self.index = store, samples, index
-        self.changes: dict[str, str] = {}  # sample id -> new right text
+        # sample id -> (right text, speaker's name or None), for the samples you changed
+        self.changes: dict[str, tuple[str, str | None]] = {}
         self.setWindowTitle("Edit answers")
         self.resize(760, 520)
         self.picture = QLabel()
@@ -77,6 +78,9 @@ class EditAnswersDialog(QDialog):
         self.diff.setWordWrap(True)
         self.diff.setTextFormat(Qt.TextFormat.RichText)
         self.ocr.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.speaker_box = QLineEdit()
+        self.speaker_box.setPlaceholderText("No speaker")
+        self.speaker_box.setStyleSheet("font-size: 16px; font-weight: bold;")
         self.editor = QPlainTextEdit()
         self.editor.setStyleSheet("font-size: 18px;")
         self.warning = QLabel()
@@ -105,6 +109,10 @@ class EditAnswersDialog(QDialog):
         layout.addWidget(self.info)
         layout.addWidget(QLabel("OCR read:"))
         layout.addWidget(self.ocr)
+        speaker_row = QHBoxLayout()
+        speaker_row.addWidget(QLabel("Speaker:"))
+        speaker_row.addWidget(self.speaker_box, 1)
+        layout.addLayout(speaker_row)
         layout.addWidget(QLabel("Right text:"))
         layout.addWidget(self.editor, 1)
         layout.addWidget(QLabel("Differences (OCR read → right text):"))
@@ -112,6 +120,7 @@ class EditAnswersDialog(QDialog):
         layout.addWidget(self.warning)
         layout.addLayout(nav)
         self.editor.textChanged.connect(self._remember)
+        self.speaker_box.textChanged.connect(self._remember)
         self._show()
 
     def _clean(self, text: str) -> str:
@@ -120,8 +129,10 @@ class EditAnswersDialog(QDialog):
     def _remember(self) -> None:
         s = self.samples[self.index]
         text = self._clean(self.editor.toPlainText())
-        if text and text != (s.truth or ""):
-            self.changes[s.id] = text
+        speaker = " ".join(self.speaker_box.text().split()) or None
+        current = "\n".join(s.answer_lines()) if s.truth else None
+        if text and (text != current or speaker != (s.shown_speaker or None)):
+            self.changes[s.id] = (text, speaker)
         else:
             self.changes.pop(s.id, None)
         self._update_labels()
@@ -129,7 +140,8 @@ class EditAnswersDialog(QDialog):
 
     def _update_diff(self) -> None:
         s = self.samples[self.index]
-        before, after = diff_html(s.ocr_text, self._clean(self.editor.toPlainText()))
+        speaker = " ".join(self.speaker_box.text().split()) or None
+        before, after = sample_html(s, self._clean(self.editor.toPlainText()), speaker)
         self.diff.setText(f"<div style='font-size:16px'>{before}<br>→ {after}</div>")
 
     def _show(self) -> None:
@@ -139,10 +151,16 @@ class EditAnswersDialog(QDialog):
             pm = pm.scaled(QSize(700, 140), Qt.AspectRatioMode.KeepAspectRatio,
                            Qt.TransformationMode.SmoothTransformation)
         self.picture.setPixmap(pm)
-        self.ocr.setText(s.ocr_text or "(nothing)")
+        self.ocr.setText(s.ocr_text or "(nothing)")  # as OCR read it: name and dialogue
         self.editor.blockSignals(True)
-        self.editor.setPlainText(self.changes.get(s.id, s.truth or s.ocr_text))
+        self.speaker_box.blockSignals(True)
+        kept = self.changes.get(s.id)
+        self.speaker_box.setText((kept[1] if kept else s.shown_speaker) or "")
+        # without the speaker line: the window shows it separately
+        start = "\n".join(s.answer_lines() if s.truth else s.ocr_lines())
+        self.editor.setPlainText(kept[0] if kept else start)
         self.editor.blockSignals(False)
+        self.speaker_box.blockSignals(False)
         self._update_labels()
         self._update_diff()
         self.editor.setFocus()
@@ -176,7 +194,7 @@ class DataManagerWindow(QDialog):
     changed = Signal()  # samples were edited, labelled or deleted
 
     def __init__(self, store: OcrDataStore, usage=lambda: {}, parent=None,
-                 on_answer=lambda sid, text: 0) -> None:
+                 on_answer=lambda sid, text, speaker=None: 0) -> None:
         super().__init__(parent)
         self.setWindowTitle("Manage OCR data")
         self.resize(1180, 720)
@@ -185,7 +203,8 @@ class DataManagerWindow(QDialog):
         # sample; a sample used by a favorite capture can't be deleted
         self._usage_of = usage
         self._usage: dict = {}
-        self._on_answer = on_answer  # (sample id, text): History captures show the new text
+        # (sample id, text, speaker): History captures show the new answer and name
+        self._on_answer = on_answer
         self.samples: list[Sample] = []
         self._ticked: set[str] = set()  # sample ids ticked (kept across reloads)
 
@@ -196,7 +215,7 @@ class DataManagerWindow(QDialog):
         self.category_filter = QComboBox()
         self.status_filter = QComboBox()
         self.status_filter.addItem("All statuses", ALL)
-        for key, label in (("edited", "Fixed with Edit"), ("confirmed", "✓ Correct"),
+        for key, label in (("edited", "Fixed with Edit"), ("same", "Same as OCR"),
                            ("none", "Not checked")):
             self.status_filter.addItem(label, key)
         self.search = QLineEdit()
@@ -346,10 +365,8 @@ class DataManagerWindow(QDialog):
         self.table.setItem(i, COL_TICK, tick)
         self.table.setItem(i, COL_PICTURE, item(""))
         ocr_item, answer_item = item(""), item("")
-        if s.truth is None:
-            ocr_html, answer_html = _esc(s.ocr_text), "<span style='color:#8a8f99'>—</span>"
-        else:
-            ocr_html, answer_html = diff_html(s.ocr_text, s.truth)
+        # the speaker's name on the first line, the dialogue below (one cell each)
+        ocr_html, answer_html = sample_html(s)
         ocr_item.setData(_HTML, ocr_html)
         answer_item.setData(_HTML, answer_html)
         self.table.setItem(i, COL_OCR, ocr_item)
@@ -397,7 +414,7 @@ class DataManagerWindow(QDialog):
             return False
         if cat == NONE and s.category or cat not in (ALL, NONE) and s.category != cat:
             return False
-        state = (s.truth_source if s.truth is not None else "none") or "none"
+        state = s.state
         if status is not None and state != status:
             return False
         return not text or text in (s.ocr_text + "\n" + (s.truth or "")).lower()
@@ -481,15 +498,18 @@ class DataManagerWindow(QDialog):
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.changes:
             return
         packs = set()
-        for sid, text in dlg.changes.items():
+        for sid, (text, speaker) in dlg.changes.items():
             s = self.store.get(sid)
             if s is None:
                 continue
             if s.source_pack_id:
                 packs.add(s.source_pack)
-            self.store.set_truth(sid, text, "edited")
+            if text != "\n".join(s.answer_lines()) or s.truth is None:
+                self.store.set_truth(sid, text, "edited")
+            if speaker != s.shown_speaker:
+                self.store.set_speaker(sid, speaker)
             try:
-                self._on_answer(sid, text)  # its History captures show the new answer
+                self._on_answer(sid, text, speaker)  # its History captures show it
             except Exception:  # noqa: BLE001
                 pass
         n = len(dlg.changes)

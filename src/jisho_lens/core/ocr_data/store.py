@@ -37,7 +37,8 @@ class Sample:
     engine: str = ""
     preset: str = ""
     seconds: float | None = None
-    speaker: str | None = None
+    speaker: str | None = None  # the speaker's name as OCR read it
+    speaker_fix: str | None = None  # your correction of it ("" = no speaker); None = as read
     text_type: str = "text"  # "dialogue" when a speaker line was found (OCR benchmark)
     category: str = ""  # your label, set when exporting or merging (e.g. Azur Promilia JP)
     source_pack: str = ""  # pack it was imported from ("KaiOCR v4"); "" = your own data
@@ -57,6 +58,57 @@ class Sample:
     @property
     def checked(self) -> bool:
         return self.truth is not None
+
+    def _without_speaker(self, text: str | None) -> list[str]:
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if lines and self.speaker and _key(lines[0]) == _key(self.speaker):
+            lines = lines[1:]  # the speaker line OCR also read
+        return lines
+
+    def ocr_lines(self) -> list[str]:
+        """What OCR read, as the window shows it (without the speaker line)."""
+        return self._without_speaker(self.ocr_text)
+
+    def answer_lines(self) -> list[str]:
+        """The right text, as the window shows it (without a speaker line)."""
+        return self._without_speaker(self.truth)
+
+    @property
+    def same_as_ocr(self) -> bool:
+        """The right text is what OCR read (ignoring spaces, line breaks and the speaker
+        line OCR also read): nothing was fixed."""
+        if self.truth is None:
+            return False
+        truth, ocr = _key(self.truth), _key(self.ocr_text)
+        speaker = _key(self.speaker)
+        return truth == ocr or (bool(speaker) and speaker + truth == ocr)
+
+    @property
+    def shown_speaker(self) -> str | None:
+        """The speaker's name as the window shows it: your correction, else as read."""
+        if self.speaker_fix is not None:
+            return self.speaker_fix or None
+        return self.speaker
+
+    @property
+    def speaker_fixed(self) -> bool:
+        return self.speaker_fix is not None and _key(self.speaker_fix) != _key(self.speaker)
+
+    @property
+    def is_fix(self) -> bool:
+        """Fixed with Edit: the right text or the speaker's name differs from what OCR
+        read."""
+        if self.truth is None:
+            return False
+        return self.speaker_fixed or (self.truth_source == "edited" and not self.same_as_ocr)
+
+    @property
+    def state(self) -> str:
+        """"edited" (fixed with Edit), "same" (the right text is what OCR read: ✓, or an
+        Edit that changed nothing), or "none" (not checked)."""
+        if self.truth is None:
+            return "none"
+        return "edited" if self.is_fix else "same"
 
     @property
     def source_label(self) -> str:
@@ -144,8 +196,8 @@ class OcrDataStore:
         return {
             "samples": len(samples),
             "checked": sum(s.checked for s in samples),
-            "edited": sum(s.truth_source == "edited" for s in samples),
-            "confirmed": sum(s.truth_source == "confirmed" for s in samples),
+            "edited": sum(s.is_fix for s in samples),
+            "confirmed": sum(s.checked and not s.is_fix for s in samples),
             "needs_review": sum(s.needs_review for s in samples),
         }
 
@@ -180,6 +232,26 @@ class OcrDataStore:
         best = (next((s for s in matches if want and s.truth and _key(s.truth) == want), None)
                 or next((s for s in matches if s.checked), None) or matches[0])
         return self.get(best.id)
+
+    def known_fix(self, ocr_text: str, shown: list[str]) -> list[str] | None:
+        """Your fix of this exact sentence: the right text (as the window shows it) of the
+        latest sample with the same OCR reading that you fixed with Edit. None when there is
+        none, or it is what the window already shows. (known_fix_sample gives the sample,
+        for its speaker's name.)"""
+        latest = self.known_fix_sample(ocr_text)
+        if latest is None:
+            return None
+        lines = latest.answer_lines()
+        return lines if lines and lines != list(shown) else None
+
+    def known_fix_sample(self, ocr_text: str) -> Sample | None:
+        """The latest sample with this OCR reading that you fixed (text or speaker)."""
+        key = _key(ocr_text)
+        if not key:
+            return None
+        fixes = [s for s in (self._cache if self._cache is not None else self.all())
+                 if s.is_fix and _key(s.ocr_text) == key]
+        return max(fixes, key=lambda s: s.created) if fixes else None
 
     def add_capture(self, image: Image.Image, ocr_text: str, *, engine: str, preset: str,
                     seconds: float, speaker: str | None,
@@ -334,6 +406,26 @@ class OcrDataStore:
         if sample.source_pack_id and text != sample.truth:
             sample.source_pack = sample.source_pack_id = ""
         sample.truth, sample.truth_source = text, source
+        self.save(sample)
+
+    def set_speaker(self, sid: str, speaker: str | None) -> None:
+        """Your correction of the speaker's name ("" or None = no speaker). The name as OCR
+        read it is kept, so later captures are still recognised. A name changed on a sample
+        from a pack makes it your own data. A sample without an answer gets the text as
+        OCR read it as its answer."""
+        sample = self.get(sid)
+        if sample is None:
+            return
+        speaker = " ".join((speaker or "").split())
+        fix = None if _key(speaker) == _key(sample.speaker) else speaker
+        if fix == sample.speaker_fix:
+            return
+        if sample.source_pack_id:
+            sample.source_pack = sample.source_pack_id = ""
+        sample.speaker_fix = fix
+        if sample.truth is None:
+            sample.truth = "\n".join(sample.ocr_lines())
+            sample.truth_source = "edited"
         self.save(sample)
 
     def set_category(self, sid: str, category: str) -> None:

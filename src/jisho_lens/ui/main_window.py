@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
@@ -145,7 +146,7 @@ class MainWindow(QWidget):
     history_requested = Signal()
     favorite_toggled = Signal(bool)  # star the whole phrase (History capture)
     undo_corrections_requested = Signal()  # show what OCR read before my corrections
-    text_edited = Signal(list)  # new lines
+    text_edited = Signal(list, object)  # new lines, speaker's name (None = no speaker)
     geometry_changed = Signal(list)
     display_changed = Signal(bool, bool)  # furigana, romaji
 
@@ -200,9 +201,22 @@ class MainWindow(QWidget):
             f"background:#1d1f24; color:#f1f1f1; font-size:{font_size}px;"
             "font-family:'Yu Gothic UI','Meiryo'; border:1px solid #3d7dd8;"
         )
+        # edit mode: the speaker's name above the text
+        self.speaker_edit = QLineEdit()
+        self.speaker_edit.setPlaceholderText("No speaker")
+        self.speaker_edit.setStyleSheet("background:#1d1f24; color:#a9cfff; font-weight:bold;"
+                                        "border:1px solid #3d7dd8; padding:2px 6px;")
+        self.edit_page = QWidget()
+        edit_layout = QVBoxLayout(self.edit_page)
+        edit_layout.setContentsMargins(0, 0, 0, 0)
+        speaker_row = QHBoxLayout()
+        speaker_row.addWidget(QLabel("Speaker"))
+        speaker_row.addWidget(self.speaker_edit, 1)
+        edit_layout.addLayout(speaker_row)
+        edit_layout.addWidget(self.editor, 1)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.view)
-        self.stack.addWidget(self.editor)
+        self.stack.addWidget(self.edit_page)
 
         self.recapture_btn = QPushButton("Re-capture")
         self.edit_btn = QPushButton("Edit")
@@ -212,6 +226,7 @@ class MainWindow(QWidget):
         self.cancel_edit_btn.clicked.connect(
             lambda _checked=False: self._leave_edit_mode(save=False))
         self.editor.installEventFilter(self)  # Esc in the editor = Cancel
+        self.speaker_edit.installEventFilter(self)
         self.copy_btn = QPushButton("Copy")
         self.confirm_btn = QPushButton("✓ Correct")
         self.confirm_btn.setToolTip("OCR read this correctly: keep it as a checked sample "
@@ -423,18 +438,19 @@ class MainWindow(QWidget):
         button.style().polish(button)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if (obj is self.editor and event.type() == QEvent.Type.KeyPress
+        if (obj in (self.editor, self.speaker_edit) and event.type() == QEvent.Type.KeyPress
                 and event.key() == Qt.Key.Key_Escape):
             self._leave_edit_mode(save=False)
             return True
         return super().eventFilter(obj, event)
 
     def _toggle_edit(self) -> None:
-        if self.stack.currentWidget() is self.editor:
+        if self.stack.currentWidget() is self.edit_page:
             self._leave_edit_mode(save=True)
         else:
             self.editor.setPlainText(self.text())
-            self.stack.setCurrentWidget(self.editor)
+            self.speaker_edit.setText(self._speaker or "")
+            self.stack.setCurrentWidget(self.edit_page)
             self.edit_btn.setText("Done")
             self.edit_btn.setToolTip("Save the edited text")
             self._set_active(self.edit_btn, True)
@@ -443,7 +459,7 @@ class MainWindow(QWidget):
             self.editor.setFocus()
 
     def _leave_edit_mode(self, save: bool) -> None:
-        if self.stack.currentWidget() is not self.editor:
+        if self.stack.currentWidget() is not self.edit_page:
             return
         self.stack.setCurrentWidget(self.view)
         self.edit_btn.setText("Edit")
@@ -453,8 +469,10 @@ class MainWindow(QWidget):
         if save:
             new_lines = [ln.strip() for ln in self.editor.toPlainText().splitlines()
                          if ln.strip()]
-            if new_lines != self._lines:
-                self.text_edited.emit(new_lines)  # the app re-analyzes and calls show_text
+            speaker = " ".join(self.speaker_edit.text().split()) or None
+            if new_lines != self._lines or speaker != (self._speaker or None):
+                # the app re-analyzes and calls show_text
+                self.text_edited.emit(new_lines, speaker)
 
     def _copy(self) -> None:
         QGuiApplication.clipboard().setText(self.text())

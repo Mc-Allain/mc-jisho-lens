@@ -81,6 +81,34 @@ def diff_html(before: str | None, after: str) -> tuple[str, str]:
     return "".join(a), "".join(b)
 
 
+def sample_html(sample, text: str | None = None, speaker=...) -> tuple[str, str]:
+    """(OCR read, right answer) of a sample as HTML for one cell each: the speaker's name
+    on the first line, the dialogue below, the differences highlighted in both. `text` /
+    `speaker` replace the right answer / your name (e.g. while editing)."""
+    read_speaker = sample.speaker or ""
+    read_text = "\n".join(sample.ocr_lines())
+    fixed_speaker = (sample.shown_speaker if speaker is ... else speaker) or ""
+    fixed_text = "\n".join(sample.answer_lines()) if text is None else text
+    if text is None and sample.truth is None:  # not checked: no right answer yet
+        return (_speaker_line(_esc(read_speaker)) + _esc(read_text),
+                "<span style='color:#8a8f99'>—</span>")
+    text_before, text_after = diff_html(read_text, fixed_text) if read_text else (
+        "", _esc(fixed_text))
+    if read_speaker or fixed_speaker:
+        name_before, name_after = (diff_html(read_speaker, fixed_speaker) if read_speaker
+                                   else ("", _esc(fixed_speaker)))
+        if not fixed_speaker:  # the name was removed
+            name_after = "<span style='color:#8a8f99'>(no speaker)</span>"
+    else:
+        name_before = name_after = ""
+    return (_speaker_line(name_before) + text_before, _speaker_line(name_after) + text_after)
+
+
+def _speaker_line(name_html: str) -> str:
+    return (f"<span style='color:#a9cfff;font-weight:bold'>{name_html}</span><br>"
+            if name_html else "")
+
+
 class _HtmlDelegate(QStyledItemDelegate):
     """Draws a cell's HTML (diff highlighting) instead of plain text."""
 
@@ -391,6 +419,10 @@ class PackReviewDialog(QDialog):
                     parts.append(f"{after}<br><span style='color:#8a8f99'>"
                                  f"{html.escape(a.pack)}</span>")
                 after_item.setData(_HTML, "<br>".join(parts))
+            elif self.mode == "export":
+                before, after = sample_html(row.sample)  # name + dialogue, one cell each
+                before_item.setData(_HTML, before)
+                after_item.setData(_HTML, after)
             else:
                 before, after = diff_html(row.before, row.after)
                 if self.mode == "merge" and row.before is None:

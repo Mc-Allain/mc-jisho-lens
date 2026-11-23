@@ -156,6 +156,23 @@ class HistoryStore:
             out.setdefault(sid, []).append((cid, created, bool(fav)))
         return out
 
+    def set_speaker(self, capture_id: int, speaker: str | None) -> None:
+        with self._lock:
+            self._db.execute("UPDATE captures SET speaker = ? WHERE id = ?",
+                             (speaker or None, capture_id))
+            self._db.commit()
+
+    def sync_speaker(self, sample_id: str, speaker: str | None,
+                     except_id: int | None = None) -> int:
+        """A sample's speaker's name changed: every History capture using it shows it."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE captures SET speaker = ? WHERE sample_id = ? AND id IS NOT ? "
+                "AND COALESCE(speaker, '') != ?",
+                (speaker or None, sample_id, except_id, speaker or ""))
+            self._db.commit()
+            return cur.rowcount
+
     def sync_text(self, sample_id: str, text: str, except_id: int | None = None) -> int:
         """The right answer of an OCR data sample changed: every History capture using that
         sample shows it (as its edited text). Returns how many captures changed."""

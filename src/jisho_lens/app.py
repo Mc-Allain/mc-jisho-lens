@@ -140,11 +140,13 @@ class JishoLens:
         # Remember my corrections (only while collecting): fixes learned from Edit
         self.corrections = CorrectionStore()
         self._ocr_lines: list[str] | None = None  # text as OCR read it, before corrections
+        self._ocr_speaker: str | None = None  # the speaker's name as OCR read it
         self._applied: list = []  # corrections used on the text on screen
         if self.settings.data.collecting and not self.corrections.path.exists():
             self._learn_from_samples()
         self._tidy_ocr_data()
         self._relink_captures()
+        self._prune_corrections()
         self._retrying = False
 
         # single instance server
@@ -487,10 +489,18 @@ class JishoLens:
         self._pending_job = None
         self._arm_cancel(False)
         self.tray.setIcon(app_icon())
-        status =f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
+        status = f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
         lines, analysis = outcome.cleaned.lines, outcome.analysis
         self._ocr_lines, self._applied = list(lines), []
-        if self.settings.data.collecting:
+        speaker = self._ocr_speaker = outcome.cleaned.speaker
+        known = self._known_fix(outcome) if self.settings.data.collecting else None
+        if known:
+            # a sentence you already fixed: show your fix (Undo shows what OCR read)
+            lines, speaker = known
+            a = self.settings.analysis
+            analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
+            status += " · Your fix from earlier"
+        elif self.settings.data.collecting:
             try:
                 result = self.corrections.apply(lines)
             except Exception:  # noqa: BLE001
@@ -503,12 +513,28 @@ class JishoLens:
                 analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
                 n = len(result.used)
                 status += f" · Applied {n} of your earlier correction{'s' if n > 1 else ''}"
-        self._show_analysis(lines, analysis, outcome.cleaned.speaker, status)
-        self.window.set_corrections(len(self._applied))
-        self._record(outcome, lines)
+        self._show_analysis(lines, analysis, speaker, status)
+        self.window.set_corrections(len(self._applied) or (1 if known else 0))
+        self._record(outcome, lines, speaker)
 
-    # ---------- history and OCR data ----------
-    def _record(self, outcome: OcrOutcome, lines: list[str]) -> None:
+    def _known_fix(self, outcome: OcrOutcome) -> tuple[list[str], str | None] | None:
+        """Your fix of this exact sentence: (lines, speaker's name) to show, or None (see
+        OcrDataStore.known_fix_sample)."""
+        try:
+            sample = self.ocr_data.known_fix_sample(outcome.raw.text)
+        except Exception:  # noqa: BLE001
+            log.exception("looking up an earlier fix failed")
+            return None
+        if sample is None:
+            return None
+        lines = sample.answer_lines() or list(outcome.cleaned.lines)
+        speaker = sample.shown_speaker if sample.speaker_fix is not None \
+            else outcome.cleaned.speaker
+        if lines == list(outcome.cleaned.lines) and speaker == outcome.cleaned.speaker:
+            return None
+        return lines, speaker
+
+    def _record(self, outcome: OcrOutcome, lines: list[str], speaker: str | None) -> None:
         """Save the capture to History and, if the user agreed, keep it as an OCR sample."""
         data = self.settings.data
         if data.collect == "ask":
@@ -520,7 +546,8 @@ class JishoLens:
                 self.settings.save()
             log.info("OCR data collection: %s", data.collect)
         job, raw = outcome.job, outcome.raw.text  # raw OCR (with speaker line) for OCR data
-        speaker = outcome.cleaned.speaker
+        read_speaker = outcome.cleaned.speaker  # as OCR read it (kept in OCR data)
+        # `speaker`: as shown (your fixed name, or None if you removed it)
         shown = "\n".join(lines)  # History keeps the text as shown
         self._sample_id = None
         png = png_bytes(job.image)
@@ -529,7 +556,7 @@ class JishoLens:
             try:
                 self._sample_id = self.ocr_data.add_capture(
                     job.image, raw, engine=job.engine, preset=job.preset,
-                    seconds=round(outcome.seconds, 3), speaker=speaker,
+                    seconds=round(outcome.seconds, 3), speaker=read_speaker,
                     screen=_screen_info(), png=png, shown=shown)
                 if self._sample_id == sample_id(png):
                     same_file = self.ocr_data.png_path(self._sample_id)
@@ -625,7 +652,7 @@ class JishoLens:
             return
         parent = self._history_window if self._history_window is not None else None
         dlg = DataManagerWindow(self.ocr_data, self.history.sample_usage, parent,
-                                on_answer=self.history.sync_text)
+                                on_answer=self._on_answer_managed)
         dlg.setWindowIcon(app_icon())
         dlg.changed.connect(self._on_data_managed)
         dlg.finished.connect(lambda _=0: setattr(self, "_data_manager", None))
@@ -634,13 +661,40 @@ class JishoLens:
         self._data_manager = dlg
         dlg.show()
 
+    def _on_answer_managed(self, sample_id: str, text: str, speaker=None) -> None:
+        """An answer changed in Manage OCR data: its History captures show it (text and
+        speaker's name), and (while collecting) the fix is learned like an Edit."""
+        self.history.sync_text(sample_id, text)
+        self.history.sync_speaker(sample_id, speaker)
+        if not self.settings.data.collecting:
+            return
+        sample = self.ocr_data.get(sample_id)
+        if sample is not None:
+            try:
+                self.corrections.learn(sample.ocr_lines(), sample.answer_lines(),
+                                       sample_id=sample_id)
+            except Exception:  # noqa: BLE001
+                log.exception("learning from a Manage edit failed")
+
+    def _prune_corrections(self) -> None:
+        """Learned corrections whose sample was deleted or whose fix changed are forgotten
+        (they are never applied once their fix is gone)."""
+        try:
+            gone = self.corrections.prune(self.ocr_data.all())
+            if gone:
+                log.info("forgot %d learned corrections without their fix", gone)
+        except Exception:  # noqa: BLE001
+            log.exception("checking learned corrections failed")
+
     def _on_data_managed(self) -> None:
+        self._prune_corrections()
         if self._history_window is not None:
             self._history_window.refresh()
         self._on_history_changed()
 
     def _on_history_changed(self) -> None:
         """Captures or collected data were deleted in the History window."""
+        self._prune_corrections()
         if self._capture_id is not None and self.history.get(self._capture_id) is None:
             self._capture_id = None
         if self._sample_id and self.ocr_data.get(self._sample_id) is None:
@@ -690,23 +744,31 @@ class JishoLens:
             status = f"{status} · {analysis.warning}"
         self.window.show_text(lines, analysis.tokens, speaker, status, analysis.dictionary)
 
-    def _on_text_edited(self, lines: list[str]) -> None:
+    def _on_text_edited(self, lines: list[str], speaker: str | None = None) -> None:
         before = list(self.window._lines)  # the text as shown before this edit
+        old_speaker = self.window._speaker or None
         a = self.settings.analysis
         analysis = analyze_text(lines, a.word_splitting, a.dictionary_active)
-        self._show_analysis(lines, analysis, self.window._speaker, "Edited")
+        self._show_analysis(lines, analysis, speaker, "Edited")
         self.window.set_corrections(0)
         text = "\n".join(lines)
         if self._capture_id is not None:
             self.history.set_edited(self._capture_id, text)
+            if speaker != old_speaker:
+                self.history.set_speaker(self._capture_id, speaker)
         if self._sample_id:
             self.ocr_data.set_truth(self._sample_id, text, "edited")
+            if speaker != old_speaker:
+                self.ocr_data.set_speaker(self._sample_id, speaker)
+                self.history.sync_speaker(self._sample_id, speaker,
+                                          except_id=self._capture_id)
             # other captures of the same sentence show the corrected text too
             self.history.sync_text(self._sample_id, text, except_id=self._capture_id)
             status = "Edited · correction saved"
-            if self.settings.data.collecting:
+            if self.settings.data.collecting and lines != before:
                 try:
-                    learned = self.corrections.learn(before, lines, self._applied)
+                    learned = self.corrections.learn(before, lines, self._applied,
+                                                     sample_id=self._sample_id)
                 except Exception:  # noqa: BLE001
                     log.exception("learning corrections failed")
                     learned = 0
@@ -767,7 +829,7 @@ class JishoLens:
             return
         a = self.settings.analysis
         analysis = analyze_text(self._ocr_lines, a.word_splitting, a.dictionary_active)
-        self._show_analysis(self._ocr_lines, analysis, self.window._speaker,
+        self._show_analysis(self._ocr_lines, analysis, self._ocr_speaker,
                             "As OCR read it · Edit to fix, or ✓ if it's right")
         self.window.set_corrections(0)
 

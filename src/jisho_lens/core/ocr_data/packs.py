@@ -65,7 +65,7 @@ class PackError(ValueError):
 def is_shareable(sample: Sample) -> bool:
     """Only samples fixed with Edit go into packs (OCR read the others right, or they were
     never checked)."""
-    return sample.truth is not None and sample.truth_source == "edited"
+    return sample.is_fix
 
 
 # ---------------------------------------------------------------- export
@@ -243,6 +243,7 @@ def _valid_sample(s: Sample) -> bool:
             and _str(s.speaker, True) and _str(s.contributor) and _str(s.category)
             and _str(s.engine) and _str(s.preset) and _str(s.text_type)
             and _str(s.source_pack) and _str(s.source_pack_id, True)
+            and _str(s.speaker_fix, True)
             and isinstance(s.screen, dict) and isinstance(s.needs_review, bool)
             and isinstance(s.alternatives, list)
             and all(isinstance(a, dict) and _str(a.get("truth"), True)
@@ -519,7 +520,7 @@ class ImportResult:
     skipped: int = 0  # excluded, or already the same
     unanswered: int = 0  # samples in the pack without an Edit fix (not offered)
     learned: int = 0  # OCR fixes learned ("Also learn OCR fixes from these")
-    fixed: list[tuple[str, str]] = field(default_factory=list)  # (ocr_text, truth) applied
+    fixed: list[tuple[str, str, str]] = field(default_factory=list)  # (id, ocr, truth)
 
     # names used before the review window existed
     @property
@@ -583,7 +584,7 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
             take_source(sample, row.pack)
             store.save(sample, row.pack.image(row.sid))
             result.added += 1
-            result.fixed.append((row.ocr_text, theirs.truth))
+            result.fixed.append((row.sid, row.ocr_text, theirs.truth))
         elif local.truth is None:
             local.category = local.category or row.category
             local.truth, local.truth_source = theirs.truth, "edited"
@@ -591,7 +592,7 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
             take_source(local, row.pack)
             store.save(local)
             result.answers_added += 1
-            result.fixed.append((row.ocr_text, theirs.truth))
+            result.fixed.append((row.sid, row.ocr_text, theirs.truth))
         elif row.choice == USE_THEIRS:
             local.alternatives.append({"truth": local.truth, "source": local.truth_source,
                                        "contributor": local.contributor})
@@ -600,7 +601,7 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
             take_source(local, row.pack)
             store.save(local)
             result.replaced += 1
-            result.fixed.append((row.ocr_text, theirs.truth))
+            result.fixed.append((row.sid, row.ocr_text, theirs.truth))
         elif row.choice == KEEP_ALTERNATIVE:
             local.alternatives += [a.as_alternative() for a in row.answers]
             local.needs_review = True
@@ -623,8 +624,10 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
         if (used or same or declined) and pack.info is not None and not mine_pack:
             store.provenance.record_import(pack.info, used, declined, same)
     if corrections is not None:
-        for ocr_text, truth in result.fixed:
-            result.learned += corrections.learn(ocr_text.splitlines(), truth.splitlines())
+        for sid, ocr_text, truth in result.fixed:
+            s = store.get(sid)
+            lines = s.ocr_lines() if s is not None else ocr_text.splitlines()
+            result.learned += corrections.learn(lines, truth.splitlines(), sample_id=sid)
     return result
 
 

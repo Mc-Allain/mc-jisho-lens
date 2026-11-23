@@ -221,3 +221,22 @@ def test_no_rules_learned_from_a_completely_different_text():
 
 def test_learning_still_works_for_small_fixes():
     assert learn_rules(["村長の家に寄るそ。"], ["村長の家に寄るぞ。"]) == [("るそ。", "るぞ。")]
+
+
+# ---------- an Edit that changes nothing is not a fix
+def test_edit_equal_to_ocr_is_same_as_ocr(tmp_path):
+    store = OcrDataStore(tmp_path / "s")
+    sid = store.add_capture(img("x"), "テララ\nそうだ、探しに", engine="x", preset="none",
+                            seconds=1, speaker="テララ")
+    # saved with Edit, but the same text OCR read (the speaker line isn't in the answer)
+    store.set_truth(sid, "そうだ、 探しに", "edited")
+    s = store.get(sid)
+    assert s.same_as_ocr and not s.is_fix and s.state == "same"
+    assert select(store) == []  # not exported: nothing was fixed
+    assert store.stats()["edited"] == 0 and store.stats()["confirmed"] == 1
+    store.set_truth(sid, "そうだ、探しに！", "edited")  # a real fix
+    s = store.get(sid)
+    assert s.is_fix and s.state == "edited" and [x.id for x in select(store)] == [sid]
+    unchecked = store.add_capture(img("y"), "ほか", engine="x", preset="none", seconds=1,
+                                  speaker=None)
+    assert store.get(unchecked).state == "none"

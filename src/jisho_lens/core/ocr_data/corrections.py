@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -35,6 +35,7 @@ class Correction:
     used: int = 0  # times applied
     created: str = ""
     last_used: str = ""
+    samples: list = field(default_factory=list)  # ids of the OCR data samples it came from
 
     @property
     def label(self) -> str:
@@ -141,7 +142,9 @@ class CorrectionStore:
         if self._rules is None:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
-                self._rules = [Correction(**r) for r in data.get("rules", [])]
+                known = set(Correction.__dataclass_fields__)
+                self._rules = [Correction(**{k: v for k, v in r.items() if k in known})
+                               for r in data.get("rules", []) if isinstance(r, dict)]
             except (OSError, ValueError, TypeError):
                 self._rules = []
         return list(self._rules)
@@ -167,11 +170,13 @@ class CorrectionStore:
         return result
 
     def learn(self, before: list[str], after: list[str],
-              applied: list[Correction] | None = None) -> int:
+              applied: list[Correction] | None = None, sample_id: str | None = None) -> int:
         """Learn from an edit. Returns the number of new or changed rules.
 
         `applied` are the rules used on this text; one the user undid (its wrong piece is
-        back in the edited text) is forgotten.
+        back in the edited text) is forgotten. `sample_id`: the OCR data sample the fix
+        was saved to (a rule is kept only while a sample with that fix exists; see
+        prune).
         """
         self.all()
         changed = 0
@@ -188,11 +193,14 @@ class CorrectionStore:
                 continue  # putting the OCR text back is not a new correction
             rule = self._find(wrong)
             if rule is None:
-                self._rules.append(Correction(wrong, right, created=_now()))
+                rule = Correction(wrong, right, created=_now())
+                self._rules.append(rule)
             elif rule.right != right:
-                rule.right, rule.count = right, 1  # the newest answer wins
+                rule.right, rule.count, rule.samples = right, 1, []  # the newest wins
             else:
                 rule.count += 1
+            if sample_id and sample_id not in rule.samples:
+                rule.samples.append(sample_id)
             changed += 1
         if changed:
             self._save()
@@ -203,10 +211,37 @@ class CorrectionStore:
         self.all()
         n = 0
         for s in samples:
-            if s.truth_source == "edited" and s.truth:
-                n += self.learn(s.ocr_text.splitlines(), s.truth.splitlines())
+            if s.is_fix:
+                n += self.learn(s.ocr_lines(), s.answer_lines(), sample_id=s.id)
         self._save()
         return n
+
+    def prune(self, samples) -> int:
+        """Forget rules no sample supports any more (its sample was deleted, or its fix was
+        changed or undone). A rule is supported by a sample you fixed that it was learned
+        from and whose answer still has the rule's right text, or whose OCR reading ->
+        answer gives the rule. Returns how many rules were forgotten."""
+        rules = self.all()
+        if not rules:
+            return 0
+        fixed = [s for s in samples if s.is_fix]
+        derived: dict[str, set] = {s.id: set(learn_rules(s.ocr_lines(), s.answer_lines()))
+                                   for s in fixed}
+        answers = {s.id: _wrap(s.answer_lines()) for s in fixed}
+        keep, relinked = [], False
+        for rule in rules:
+            support = [s.id for s in fixed
+                       if (rule.wrong, rule.right) in derived[s.id]
+                       or (s.id in rule.samples and rule.right in answers[s.id])]
+            if support:
+                relinked = relinked or rule.samples != support
+                rule.samples = support
+                keep.append(rule)
+        gone = len(rules) - len(keep)
+        if gone or relinked:
+            self._rules = keep
+            self._save()
+        return gone
 
     def forget(self,applied: list[Correction], text_lines: list[str]) -> int:
         """Drop applied rules whose original OCR piece the user kept (e.g. ✓ after Undo)."""
