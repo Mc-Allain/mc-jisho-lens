@@ -6,12 +6,18 @@ furigana sits over kanji, and a romaji line can be shown under each line.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QGuiApplication
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QBoxLayout,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -41,6 +47,7 @@ BUTTON_COLORS = {
     "undo": "#e07b4a",  # Undo applied corrections
     "display": "#6fb3e0",  # Furigana, Romaji
     "settings": "#8a8f99",
+    "cancel": "#c96b6b",  # Cancel while editing
 }
 
 
@@ -90,6 +97,17 @@ def button_style() -> str:
             f"{sel}:disabled {{ background: transparent; border-color: #3a3d44;"
             f" color: #5d616b; }}")
     return "".join(css)
+
+
+def _divider() -> QFrame:
+    """A thin vertical line between groups of controls."""
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.VLine)
+    line.setFixedWidth(9)
+    line.setStyleSheet("QFrame { color: #4a4e57; background: transparent; margin: 4px 4px; }"
+                       "QFrame[frameShape='5'] { border: none; border-left: 1px solid "
+                       "#4a4e57; }")
+    return line
 
 
 class ElideLabel(QLabel):
@@ -171,6 +189,7 @@ class MainWindow(QWidget):
         self.undo_btn.setVisible(False)
         self.undo_btn.clicked.connect(self.undo_corrections_requested)
         top.addWidget(self.undo_btn)
+        top.addWidget(_divider())  # display options
         top.addWidget(self.furigana_btn)
         top.addWidget(self.romaji_btn)
 
@@ -187,6 +206,12 @@ class MainWindow(QWidget):
 
         self.recapture_btn = QPushButton("Re-capture")
         self.edit_btn = QPushButton("Edit")
+        self.cancel_edit_btn = QPushButton("Cancel")  # shown while editing
+        self.cancel_edit_btn.setToolTip("Stop editing without saving (Esc)")
+        self.cancel_edit_btn.setVisible(False)
+        self.cancel_edit_btn.clicked.connect(
+            lambda _checked=False: self._leave_edit_mode(save=False))
+        self.editor.installEventFilter(self)  # Esc in the editor = Cancel
         self.copy_btn = QPushButton("Copy")
         self.confirm_btn = QPushButton("✓ Correct")
         self.confirm_btn.setToolTip("OCR read this correctly: keep it as a checked sample "
@@ -225,19 +250,26 @@ class MainWindow(QWidget):
         self.actions_bar = QWidget()
         actions = QHBoxLayout(self.actions_bar)
         actions.setContentsMargins(0, 0, 0, 0)
-        for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.confirm_btn,
-                  self.favorite_btn, self.history_btn):
-            actions.addWidget(w)
+        # groups: capture | the text | keeping it (OCR data, favorites, History)
+        for group in ((self.recapture_btn,), (self.edit_btn, self.cancel_edit_btn, self.copy_btn),
+                      (self.confirm_btn, self.favorite_btn, self.history_btn)):
+            if actions.count():
+                actions.addWidget(_divider())
+            for w in group:
+                actions.addWidget(w)
         actions.addStretch(1)
         self.ocr_bar = QWidget()
         ocr = QHBoxLayout(self.ocr_bar)
         ocr.setContentsMargins(0, 0, 0, 0)
         ocr.addStretch(1)
+        # groups: reading again (engine, image filter, Retry) | settings
         for w in (engine_label, self.engine_box):
             ocr.addWidget(w)
         ocr.addSpacing(6)
-        for w in (preset_label, self.preset_box, self.retry_btn, self.settings_btn):
+        for w in (preset_label, self.preset_box, self.retry_btn):
             ocr.addWidget(w)
+        ocr.addWidget(_divider())
+        ocr.addWidget(self.settings_btn)
         self.bottom = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.bottom.addWidget(self.actions_bar, 1)
         self.bottom.addWidget(self.ocr_bar)
@@ -249,6 +281,7 @@ class MainWindow(QWidget):
         layout.addLayout(self.bottom)
         roles = {
             "capture": (self.recapture_btn, self.retry_btn), "edit": (self.edit_btn,),
+            "cancel": (self.cancel_edit_btn,),
             "copy": (self.copy_btn,), "confirm": (self.confirm_btn,),
             "favorite": (self.favorite_btn,), "history": (self.history_btn,),
             "undo": (self.undo_btn,), "display": (self.furigana_btn, self.romaji_btn),
@@ -389,6 +422,13 @@ class MainWindow(QWidget):
         button.style().unpolish(button)
         button.style().polish(button)
 
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if (obj is self.editor and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            self._leave_edit_mode(save=False)
+            return True
+        return super().eventFilter(obj, event)
+
     def _toggle_edit(self) -> None:
         if self.stack.currentWidget() is self.editor:
             self._leave_edit_mode(save=True)
@@ -396,7 +436,9 @@ class MainWindow(QWidget):
             self.editor.setPlainText(self.text())
             self.stack.setCurrentWidget(self.editor)
             self.edit_btn.setText("Done")
+            self.edit_btn.setToolTip("Save the edited text")
             self._set_active(self.edit_btn, True)
+            self.cancel_edit_btn.setVisible(True)
             self.activateWindow()
             self.editor.setFocus()
 
@@ -405,7 +447,9 @@ class MainWindow(QWidget):
             return
         self.stack.setCurrentWidget(self.view)
         self.edit_btn.setText("Edit")
+        self.edit_btn.setToolTip("")
         self._set_active(self.edit_btn, False)
+        self.cancel_edit_btn.setVisible(False)
         if save:
             new_lines = [ln.strip() for ln in self.editor.toPlainText().splitlines()
                          if ln.strip()]
