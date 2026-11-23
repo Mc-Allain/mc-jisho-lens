@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -91,6 +92,33 @@ def button_style() -> str:
     return "".join(css)
 
 
+class ElideLabel(QLabel):
+    """A one-line label that shortens its text with … when the window is narrow (the full
+    text is in the hover text)."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._full = text
+        self.setMinimumWidth(40)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._elide()
+
+    def set_full_text(self, text: str) -> None:
+        self._full = text
+        self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        self.setText(self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight,
+                                                   max(0, self.width())))
+
+
 class MainWindow(QWidget):
     recapture_requested = Signal()
     retry_requested = Signal(str, str)  # engine, preset
@@ -130,9 +158,13 @@ class MainWindow(QWidget):
             b.toggled.connect(self._display_toggled)
         self.status_label = QLabel()
         self.status_label.setStyleSheet("color: #8a8f99; font-size: 12px;")
+        # what your OCR data is made of, always shown ("RavenOCR v2 + own data")
+        self.data_label = ElideLabel()
+        self.data_label.setStyleSheet("color: #7f9cc4; font-size: 12px;")
         top = QHBoxLayout()
         top.addWidget(self.speaker_label)
-        top.addStretch(1)
+        top.addSpacing(8)
+        top.addWidget(self.data_label, 1)
         top.addWidget(self.status_label)
         self.undo_btn = QPushButton("Undo")
         self.undo_btn.setToolTip("Show the text as OCR read it, without your earlier corrections")
@@ -334,6 +366,11 @@ class MainWindow(QWidget):
     def _favorite_clicked(self, checked: bool) -> None:
         self.favorite_btn.setText("★ Favorite" if checked else "☆ Favorite")
         self.favorite_toggled.emit(checked)
+
+    def set_data_label(self, text: str, details: str = "") -> None:
+        """The "OCR data: …" line (shown with or without text in the window)."""
+        self.data_label.set_full_text(text)
+        self.data_label.setToolTip(details)
 
     def set_corrections(self, count: int) -> None:
         """Show Undo while the text has `count` > 0 of the user's earlier corrections."""

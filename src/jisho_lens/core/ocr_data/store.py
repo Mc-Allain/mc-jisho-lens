@@ -214,7 +214,8 @@ class OcrDataStore:
         if own:
             me = self.contributor()
             n = sum(s.contributor == me for s in self.all())
-            lines.append(f"own data: {n} samples you collected (ID {me[:8]})")
+            lines.append(f"own data: {n} sample{'s' if n != 1 else ''} you collected "
+                         f"(ID {me[:8]})")
         log = self.provenance.used_logs({s.id for s in self.all()})
         if log:
             lines += ["", "History of these packs:"] + [e.line() for e in log]

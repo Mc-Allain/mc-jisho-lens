@@ -37,6 +37,7 @@ from jisho_lens.ui import winapi
 from jisho_lens.ui.capture_overlay import CaptureOverlay
 from jisho_lens.ui.icons import app_icon
 from jisho_lens.ui.main_window import MainWindow
+from jisho_lens.ui.pack_review import plain_tooltip
 from jisho_lens.ui.settings_window import SettingsWindow
 
 log = logging.getLogger("jisho_lens")
@@ -203,6 +204,7 @@ class JishoLens:
             w.favorite_toggled.connect(self._on_favorite)
             w.geometry_changed.connect(self._save_geometry)
             self._window = w
+            self._update_data_label()
             # windows opened from the tray before the text window existed
             for child in (self._settings_window, self._history_window,
                           getattr(self, "_about", None)):
@@ -557,6 +559,7 @@ class JishoLens:
             self._history_window.refresh()
         self._update_confirm()
         self._update_favorite()
+        self._update_data_label()
 
     def _update_favorite(self) -> None:
         c = self.history.get(self._capture_id) if self._capture_id is not None else None
@@ -609,6 +612,21 @@ class JishoLens:
         if self._window is not None:
             self._update_confirm()
             self._update_favorite()
+            self._update_data_label()
+
+    def _update_data_label(self) -> None:
+        """'OCR data: KaiOCR v4 (partial) + own data' in the text window."""
+        if self._window is None:
+            return
+        try:
+            label, _uses, _own = self.ocr_data.using()
+            details = self.ocr_data.using_details()
+        except Exception:  # noqa: BLE001
+            log.exception("reading the OCR data label failed")
+            return
+        if not self.settings.data.collecting:
+            details += "\n\nCollection is off (Settings → OCR data)."
+        self._window.set_data_label(f"OCR data: {label}", plain_tooltip(details))
 
     def open_capture(self, capture_id: int) -> None:
         capture = self.history.get(capture_id)
@@ -785,6 +803,7 @@ class JishoLens:
             self._window.set_font_size(new.window.font_size)
         self.settings.save()
         self._update_tray_tooltip()
+        self._update_data_label()
 
     def _save_geometry(self, geometry: list[int]) -> None:
         self.settings.window.geometry = geometry
