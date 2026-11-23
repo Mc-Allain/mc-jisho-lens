@@ -26,7 +26,7 @@ from jisho_lens.core.displays import (
     get_displays,
 )
 from jisho_lens.core.history import HistoryStore
-from jisho_lens.core.hotkey import HotkeyManager
+from jisho_lens.core.hotkey import ESC, HotkeyManager
 from jisho_lens.core.logs import setup_logging
 from jisho_lens.core.ocr.worker import OcrOutcome, OcrService
 from jisho_lens.core.ocr_data import OcrDataStore
@@ -127,6 +127,7 @@ class JishoLens:
         self._overlay: CaptureOverlay | None = None
         self._last_image: Image.Image | None = None
         self._pending_job: int | None = None
+        self._delay_timer: QTimer | None = None  # capture delay running (Esc cancels it)
         self._settings_window: SettingsWindow | None = None
         self._history_window = None
         # History (core) and OCR data collection (opt-in, local only)
@@ -166,7 +167,12 @@ class JishoLens:
 
         self.hotkeys = HotkeyManager(app)
         self.hotkeys.pressed.connect(self.start_capture)
+        self.hotkeys.triggered.connect(self._on_hotkey)
         self.hotkey_ok, message = self.hotkeys.register(self.settings.capture.hotkey)
+        self.show_hotkey_ok, show_message = self.hotkeys.register(
+            self.settings.capture.show_hotkey, "show")
+        if not self.show_hotkey_ok:
+            log.warning("show-window hotkey not set: %s", show_message)
         if self.hotkey_ok:
             self.tray.showMessage("Jisho Lens", f"Running. Press {message} to capture text.",
                                   app_icon(), 4000)
@@ -253,7 +259,9 @@ class JishoLens:
 
     def _update_tray_tooltip(self) -> None:
         hk = self.hotkeys.current or "no hotkey"
-        self.tray.setToolTip(f"Jisho Lens {__version__} — {hk}")
+        show = self.hotkeys.current_for("show")
+        self.tray.setToolTip(f"Jisho Lens {__version__} — capture {hk}"
+                             + (f", show/hide {show}" if show else ""))
 
     def _on_instance_message(self) -> None:
         conn = self.server.nextPendingConnection()
@@ -378,14 +386,50 @@ class JishoLens:
         elif self.settings.window.on_capture == "behind":
             self._children_in_front()
         if delay > 0:
-            self.window.show_busy(f"Waiting {delay:g} s…")
+            self.window.show_busy(f"Waiting {delay:g} s… (Esc cancels)")
             if self.settings.window.on_capture != "close":
                 self._exclude_children(True)  # open windows may cover the area meanwhile
-            QTimer.singleShot(int(delay * 1000), lambda: self._delayed_grab(rect))
+            self._delay_timer = QTimer(singleShot=True)
+            self._delay_timer.timeout.connect(lambda: self._delayed_grab(rect))
+            self._delay_timer.start(int(delay * 1000))
+            self._arm_cancel(True)
         else:
             self._read(shot.crop(rect))
 
+    # ---------- Esc cancels a capture ----------
+    def _arm_cancel(self, on: bool) -> None:
+        """While a capture waits or is being read, Esc cancels it. Esc is a global hotkey
+        only for those seconds (the game keeps the focus), then it's released again."""
+        if on:
+            ok, message = self.hotkeys.register_key(ESC, "cancel")
+            if not ok:
+                log.info("Esc to cancel unavailable: %s", message)
+        else:
+            self.hotkeys.unregister("cancel")
+
+    def cancel_capture(self) -> None:
+        """Esc while waiting or reading: drop the capture; the previous text stays."""
+        busy = self._pending_job is not None or self._delay_timer is not None
+        self._arm_cancel(False)
+        if not busy:
+            return
+        if self._delay_timer is not None:
+            self._delay_timer.stop()
+            self._delay_timer = None
+            self._exclude_children(False)
+        self._pending_job = None  # its result is ignored when it arrives
+        self.tray.setIcon(app_icon())
+        self.window.end_busy("Capture cancelled")
+        log.info("capture cancelled")
+
+    def _on_hotkey(self, name: str) -> None:
+        if name == "show":
+            self._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)  # show / hide
+        elif name == "cancel":
+            self.cancel_capture()
+
     def _delayed_grab(self, rect: Rect) -> None:
+        self._delay_timer = None
         try:
             image = grab_rect(rect)
         finally:
@@ -399,10 +443,11 @@ class JishoLens:
         engine = engine or self.settings.ocr.engine
         preset = preset or self.settings.ocr.preset
         self.window.set_engine_preset(engine, preset)
-        self.window.show_busy(f"Reading… ({engine})")
+        self.window.show_busy(f"Reading… ({engine}) · Esc cancels")
         self.window.set_corrections(0)
         self._applied = []
         self.tray.setIcon(app_icon(busy=True))
+        self._arm_cancel(True)
         self._pending_job = self.ocr.submit(
             image, engine, preset,
             remove_key_icons=self.settings.capture.remove_key_icons,
@@ -419,9 +464,11 @@ class JishoLens:
 
     def _on_ocr_finished(self, outcome: OcrOutcome) -> None:
         if outcome.job.job_id != self._pending_job:
-            return  # an older job finished after a newer one was started
+            return  # an older or cancelled job finished
+        self._pending_job = None
+        self._arm_cancel(False)
         self.tray.setIcon(app_icon())
-        status = f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
+        status =f"{outcome.job.engine} · {outcome.job.preset} · {outcome.seconds:.1f} s"
         lines, analysis = outcome.cleaned.lines, outcome.analysis
         self._ocr_lines, self._applied = list(lines), []
         if self.settings.data.collecting:
@@ -664,6 +711,8 @@ class JishoLens:
     def _on_ocr_failed(self, job_id: int, message: str) -> None:
         if job_id != self._pending_job:
             return
+        self._pending_job = None
+        self._arm_cancel(False)
         self.tray.setIcon(app_icon())
         self.window.show_message(f"OCR failed: {message}", error=True)
 
@@ -706,6 +755,12 @@ class JishoLens:
                 self.tray.showMessage("Jisho Lens", f"Hotkey not set: {message}", app_icon(),
                                       6000)
                 new.capture.hotkey = self.hotkeys.current or old.capture.hotkey
+        if new.capture.show_hotkey != old.capture.show_hotkey or not self.show_hotkey_ok:
+            self.show_hotkey_ok, message = self.hotkeys.register(new.capture.show_hotkey, "show")
+            if not self.show_hotkey_ok:
+                self.tray.showMessage("Jisho Lens", f"Show-window hotkey not set: {message}",
+                                      app_icon(), 6000)
+                new.capture.show_hotkey = self.hotkeys.current_for("show") or ""
         if (new.ocr.engine != old.ocr.engine
                 or new.analysis.word_splitting != old.analysis.word_splitting
                 or new.analysis.dictionary_active != old.analysis.dictionary_active):

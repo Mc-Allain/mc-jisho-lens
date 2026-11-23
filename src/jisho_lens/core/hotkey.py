@@ -105,47 +105,71 @@ class _Filter(QAbstractNativeEventFilter):
         return False, 0
 
 
-class HotkeyManager(QObject):
-    """Registers one global hotkey on the GUI thread; emits `pressed`."""
+ESC = Hotkey(modifiers=0, vk=0x1B, text="Esc")
 
+
+class HotkeyManager(QObject):
+    """Global hotkeys on the GUI thread, by name ("capture", "show", "cancel").
+
+    `triggered(name)` is emitted for every hotkey; `pressed` for "capture" (kept for the
+    original single-hotkey use).
+    """
+
+    triggered = Signal(str)
     pressed = Signal()
-    _ID = 0xB00B
+    _IDS = {"capture": 0xB00B, "show": 0xB00C, "cancel": 0xB00D}
 
     def __init__(self, app: QApplication) -> None:
         super().__init__()
         self._filter = _Filter(self._on_hotkey)
         app.installNativeEventFilter(self._filter)
-        self._registered: Hotkey | None = None
+        self._registered: dict[str, Hotkey] = {}
 
-    def register(self, text: str) -> tuple[bool, str]:
-        """Returns (ok, message). On failure the previous hotkey stays registered."""
+    def register(self, text: str, name: str = "capture") -> tuple[bool, str]:
+        """Returns (ok, message). On failure the previous hotkey of `name` stays registered.
+        An empty text removes the hotkey (ok)."""
+        if not text.strip():
+            self.unregister(name)
+            return True, ""
         try:
             hk = parse_hotkey(text)
         except ValueError as exc:
             return False, str(exc)
-        previous = self._registered
-        self.unregister()
-        if _user32.RegisterHotKey(None, self._ID, hk.modifiers | MOD_NOREPEAT, hk.vk):
-            self._registered = hk
-            log.info("hotkey registered: %s", hk.text)
+        return self.register_key(hk, name)
+
+    def register_key(self, hk: Hotkey, name: str) -> tuple[bool, str]:
+        previous = self._registered.get(name)
+        self.unregister(name)
+        hid = self._IDS[name]
+        if _user32.RegisterHotKey(None, hid, hk.modifiers | MOD_NOREPEAT, hk.vk):
+            self._registered[name] = hk
+            log.info("hotkey %s registered: %s", name, hk.text)
             return True, hk.text
         err = ctypes.get_last_error()
         msg = f"{hk.text} is already used by another program" if err == 1409 else f"error {err}"
-        log.warning("hotkey %s not registered: %s", hk.text, msg)
+        log.warning("hotkey %s %s not registered: %s", name, hk.text, msg)
         if previous is not None:
-            _user32.RegisterHotKey(None, self._ID, previous.modifiers | MOD_NOREPEAT, previous.vk)
-            self._registered = previous
+            _user32.RegisterHotKey(None, hid, previous.modifiers | MOD_NOREPEAT, previous.vk)
+            self._registered[name] = previous
         return False, msg
 
-    def unregister(self) -> None:
-        if self._registered is not None:
-            _user32.UnregisterHotKey(None, self._ID)
-            self._registered = None
+    def unregister(self, name: str | None = None) -> None:
+        """Remove one hotkey, or all of them (name None)."""
+        for n in [name] if name else list(self._registered):
+            if self._registered.pop(n, None) is not None:
+                _user32.UnregisterHotKey(None, self._IDS[n])
+
+    def current_for(self, name: str) -> str | None:
+        hk = self._registered.get(name)
+        return hk.text if hk else None
 
     @property
     def current(self) -> str | None:
-        return self._registered.text if self._registered else None
+        return self.current_for("capture")
 
     def _on_hotkey(self, hotkey_id: int) -> None:
-        if hotkey_id == self._ID:
-            self.pressed.emit()
+        for name, hid in self._IDS.items():
+            if hid == hotkey_id:
+                self.triggered.emit(name)
+                if name == "capture":
+                    self.pressed.emit()

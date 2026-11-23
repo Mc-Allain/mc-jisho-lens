@@ -55,6 +55,13 @@ class SettingsWindow(QDialog):
         self.hotkey_hint.setStyleSheet("color: #c0392b;")
         if not hotkey_ok:
             self.hotkey_hint.setText("This hotkey couldn't be registered; choose another.")
+        self.show_hotkey = QKeySequenceEdit(QKeySequence(settings.capture.show_hotkey))
+        self.show_hotkey.setMaximumSequenceLength(1)
+        self.show_hotkey.setToolTip("Shows or hides the text window. Clear it for none.")
+        self.show_hotkey_hint = QLabel()
+        self.show_hotkey_hint.setStyleSheet("color: #c0392b;")
+        self.show_hotkey_clear = QPushButton("Clear")
+        self.show_hotkey_clear.clicked.connect(self.show_hotkey.clear)
 
         self.delay = QComboBox()
         for d in DELAYS:
@@ -136,6 +143,11 @@ class SettingsWindow(QDialog):
         form = QFormLayout()
         form.addRow("Capture hotkey", self.hotkey)
         form.addRow("", self.hotkey_hint)
+        show_row = QHBoxLayout()
+        show_row.addWidget(self.show_hotkey, 1)
+        show_row.addWidget(self.show_hotkey_clear)
+        form.addRow("Show/hide window", show_row)
+        form.addRow("", self.show_hotkey_hint)
         form.addRow("Capture delay", self.delay)
         form.addRow("OCR engine", self.engine)
         form.addRow("Image preprocessing", self.preset)
@@ -230,6 +242,18 @@ class SettingsWindow(QDialog):
                 self.hotkey_hint.setText(str(exc))
                 return
             self._settings.capture.hotkey = seq
+        show = self.show_hotkey.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        if show:
+            try:
+                parse_hotkey(show)
+            except ValueError as exc:
+                self.show_hotkey_hint.setText(str(exc))
+                return
+            if show.replace(" ", "").lower() == (seq or self._settings.capture.hotkey) \
+                    .replace(" ", "").lower():
+                self.show_hotkey_hint.setText("Use a different key from the capture hotkey.")
+                return
+        self._settings.capture.show_hotkey = show
         self._settings.capture.delay_seconds = float(self.delay.currentData())
         self._settings.ocr.engine = self.engine.currentText()
         self._settings.ocr.preset = self.preset.currentText()

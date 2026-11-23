@@ -266,6 +266,11 @@ class MainWindow(QWidget):
         self.status_label.setText(message)
         self._set_buttons_enabled(False)
 
+    def end_busy(self, message: str) -> None:
+        """Busy state ended without new text (e.g. the capture was cancelled)."""
+        self.status_label.setText(message)
+        self._set_buttons_enabled(True)
+
     def show_message(self, message: str, error: bool = False) -> None:
         self._tokens, self._lines, self._speaker = [], [], None
         self._message = (message, error)

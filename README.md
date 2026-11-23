@@ -26,7 +26,9 @@ The app starts in the system tray (字 icon). Then:
 
 1. Press **Ctrl+Alt+J** (change it in Settings). The screen freezes and dims.
 2. Drag a rectangle around Japanese text. Esc or right-click cancels.
-3. The text appears in an always-on-top window after about 1–2 seconds.
+3. The text appears in an always-on-top window after about 1–2 seconds. **Esc** cancels while it's waiting or reading (Esc is taken from the game only for those seconds); the previous text stays.
+
+**Ctrl+Alt+K** shows or hides the text window (change or clear it in Settings → Show/hide window).
 
 In the window: **click any word** to see its reading in that sentence, romaji, meanings, dictionary form and a grammar breakdown for verbs; click a **kanji** in the popup for its readings (the one used here highlighted), meaning and common words. Words missing from the dictionary (names, game terms) are marked, and coined kanji compounds get a guessed reading. **Furigana** and **Romaji** buttons switch the readings above the kanji and the romaji line on or off. **Re-capture**, **Edit** (fix OCR mistakes; the words are re-analysed), **Copy**, and **Retry** with another **OCR engine** or **Image filter** (hover over an option for what it does; on a narrow window these move to a second row). Closing the window only hides it; quit from the tray icon's menu. Left-clicking the tray icon shows or hides the window.
 

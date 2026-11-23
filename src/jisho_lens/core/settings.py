@@ -36,6 +36,7 @@ class AnalysisSettings:
 @dataclass
 class CaptureSettings:
     hotkey: str = "Ctrl+Alt+J"
+    show_hotkey: str = "Ctrl+Alt+K"  # show / hide the text window ("" = none)
     delay_seconds: float = 0.0
     remove_key_icons: bool = True
     detect_speaker: bool = True
