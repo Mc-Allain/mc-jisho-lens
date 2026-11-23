@@ -53,6 +53,16 @@ def test_versions_and_history_log(tmp_path):
     assert info.log[0].sources == "own data" and info.log[0].samples == 2
     assert raven.provenance.last_name() == "RavenOCR"
     assert raven.provenance.next_version("RavenOCR") == 2
+    # nothing changed: the same version again, no new history line
+    again = tmp_path / "again.zip"
+    export_pack(raven, again, select(raven), "RavenOCR")
+    same = read_pack(again).info
+    assert same.label == "RavenOCR v1" and len(same.log) == 1
+    assert same.pack_id == info.pack_id
+    # a change: the next version
+    sid = raven.add_capture(img("c1", (170, 40)), "c1", engine="x", preset="none",
+                            seconds=1, speaker=None)
+    raven.set_truth(sid, "C1", "edited")
     p2 = tmp_path / file_name("RavenOCR", 2)
     export_pack(raven, p2, select(raven), "RavenOCR")
     info = read_pack(p2).info
@@ -147,11 +157,12 @@ def test_merge_name_sources_and_logs(tmp_path):
     assert {e.name for e in info.log} == {"MyMix", "RavenOCR", "KaiOCR"}
     # using only Raven's answer for x1 makes Kai's pack partial; next version is v2
     x1 = next(r for r in rows if r.sid == rid[0])
-    x1.choice = 0
+    x1.choice = 1  # Kai's answer: a change
     out2 = tmp_path / "MyMix-v2.zip"
     apply_merge(rows, out2, me.contributor(), "MyMix", me)
     info = read_pack(out2).info
-    assert info.label == "MyMix v2" and info.log[0].sources == "RavenOCR v1 + KaiOCR v1 (partial)"
+    assert info.label == "MyMix v2" and info.log[0].sources == "RavenOCR v1 (partial) + KaiOCR v1"
+    assert info.log[0].changes == "1 changed"
 
 
 def test_old_packs_use_the_file_name(tmp_path):
@@ -199,3 +210,32 @@ def test_use_theirs_is_not_partial(tmp_path):
     assert preview_import_label(me, rows) == ("own data", "KaiOCR v1")
     apply_import(me, rows)
     assert me.using()[0] == "KaiOCR v1"
+
+
+def test_changes_since_the_last_version_and_start_over(tmp_path):
+    from jisho_lens.core.ocr_data.packs import release_preview
+
+    me, ids = person(tmp_path / "me", [("a1", "A1"), ("b1", "B1")])
+    export_pack(me, tmp_path / "v1.zip", select(me), "Mine")
+    assert release_preview(me, "Mine", select(me)) == (1, "no changes", True)
+    me.set_truth(ids[0], "A1 fixed", "edited")  # changed
+    me.delete(ids[1])  # removed
+    sid = me.add_capture(img("n1", (170, 40)), "n1", engine="x", preset="none", seconds=1,
+                         speaker=None)
+    me.set_truth(sid, "N1", "edited")  # new
+    assert release_preview(me, "Mine", select(me)) == (2, "1 new, 1 changed, 1 removed",
+                                                       False)
+    export_pack(me, tmp_path / "v2.zip", select(me), "Mine")
+    info = read_pack(tmp_path / "v2.zip").info
+    assert info.log[0].changes == "1 new, 1 changed, 1 removed"
+    assert "1 new, 1 changed, 1 removed" in info.log[0].line()
+    assert info.log[1].changes == "first release"
+    # a category change counts too
+    me.set_category(sid, "Azur Promilia JP")
+    assert release_preview(me, "Mine", select(me))[1:] == ("1 changed", False)
+    # start over: v1 again, a new history log
+    me.provenance.reset_series("Mine")
+    assert release_preview(me, "Mine", select(me)) == (1, "first release", False)
+    export_pack(me, tmp_path / "new-v1.zip", select(me), "Mine")
+    info = read_pack(tmp_path / "new-v1.zip").info
+    assert info.label == "Mine v1" and len(info.log) == 1

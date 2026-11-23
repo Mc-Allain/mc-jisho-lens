@@ -56,7 +56,12 @@ from jisho_lens.core.ocr_data import (  # noqa: E402  # noqa: E402
     unique_packs,
 )
 from jisho_lens.core.ocr_data.corrections import CorrectionStore  # noqa: E402
-from jisho_lens.core.ocr_data.packs import merge_sources, preview_import_label  # noqa: E402
+from jisho_lens.core.ocr_data.packs import (  # noqa: E402
+    merge_release_preview,
+    merge_sources,
+    preview_import_label,
+    release_preview,
+)
 from jisho_lens.core.ocr_data.provenance import clean_name, file_name  # noqa: E402
 
 CHOICES = {"keep": KEEP_MINE, "theirs": USE_THEIRS, "alternative": KEEP_ALTERNATIVE}
@@ -110,14 +115,16 @@ def main(argv: list[str]) -> int:
             if not name:
                 print("give your pack a name: --name RavenOCR")
                 return 2
-            version = store.provenance.next_version(name)
-            out = Path(args.pack or file_name(name, version))
             rows = review_export(store)
             if args.category is not None:
                 label_rows(rows, clean_category(args.category), only=rows)
             _only(rows, args.only)
+            version, changes, _same = release_preview(store, name,
+                                                      [r.sample for r in rows if r.include])
+            out = Path(args.pack or file_name(name, version))
             n = apply_export(store, rows, out, name)
-            print(f"exported {name} v{version}: {n} samples fixed with Edit -> {out}")
+            print(f"exported {name} v{version} ({changes}): {n} samples fixed with Edit "
+                  f"-> {out}")
         elif args.cmd == "import":
             pack = read_pack(Path(args.pack))
             print(f"{pack.label}" + (f" by {pack.info.contributor[:8]}" if pack.info else "")
@@ -159,8 +166,9 @@ def main(argv: list[str]) -> int:
                 label_rows(rows, clean_category(args.category),
                            only=[r for r in rows if not r.category])
             _only(rows, args.only)
-            version = store.provenance.next_version(name)
+            version, changes, _same = merge_release_preview(store, name, rows)
             out = Path(args.out or file_name(name, version))
+            print(f"{name} v{version}: {changes}")
             count = apply_merge(rows, out, store.contributor(), name, store)
             differs = sum(r.status == DIFFERS and r.include for r in rows)
             print(f"merged {name} v{version}: {count} samples -> {out} (from "

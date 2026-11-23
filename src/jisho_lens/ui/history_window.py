@@ -45,7 +45,12 @@ from jisho_lens.core.ocr_data import (
     unique_packs,
 )
 from jisho_lens.core.ocr_data.corrections import CorrectionStore
-from jisho_lens.core.ocr_data.packs import merge_sources, preview_import_label
+from jisho_lens.core.ocr_data.packs import (
+    merge_release_preview,
+    merge_sources,
+    preview_import_label,
+    release_preview,
+)
 from jisho_lens.core.ocr_data.provenance import clean_name, file_name, merge_logs
 from jisho_lens.core.settings import Settings
 from jisho_lens.core.storage import clear_all
@@ -79,6 +84,8 @@ class ExportNamePanel(QWidget):
         self.name.setPlaceholderText("Your pack name, e.g. RavenOCR")
         self.name.setMaxLength(40)
         self.version_label = QLabel()
+        self.changes_label = QLabel()  # since the last version of this pack
+        self.changes_label.setWordWrap(True)
         self.history = QPlainTextEdit()
         self.history.setReadOnly(True)
         self.history.setMaximumHeight(80)
@@ -94,6 +101,7 @@ class ExportNamePanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(row)
+        layout.addWidget(self.changes_label)
         layout.addWidget(QLabel("History log of this pack (since its first version):"))
         layout.addWidget(self.history)
         layout.addWidget(note)
@@ -107,19 +115,35 @@ class ExportNamePanel(QWidget):
         prov = self.store.provenance
         if not name:
             self.version_label.setText("")
+            self.changes_label.setText("")
             self.history.setPlainText("Choose a name that identifies your packs, e.g. "
-                                      "RavenOCR. Each export adds a version: v1, v2, …")
+                                      "RavenOCR. Each export with changes adds a version: "
+                                      "v1, v2, …")
             return
-        version = prov.next_version(name)
-        self.version_label.setText(f"→ <b>{html.escape(name)} v{version}</b>")
+        samples = [r.sample for r in self.rows if r.include]
+        version, changes, unchanged = release_preview(self.store, name, samples)
+        last = version if unchanged else version - 1
+        self.version_label.setText(f"→ <b>{html.escape(name)} v{version}</b>"
+                                   + (" (same version)" if unchanged else ""))
+        if unchanged:
+            self.changes_label.setText(
+                f"<span style='color:#e0a030'>No changes since {html.escape(name)} "
+                f"v{last}: it is saved again as v{last}, without a new version or history "
+                "line.</span>")
+        elif last:
+            self.changes_label.setText(f"Changes since {html.escape(name)} v{last}: "
+                                       f"<b>{html.escape(changes)}</b>")
+        else:
+            self.changes_label.setText("First release of this pack.")
         label, _uses, _own = self.store.using()
-        chosen = [r.category for r in self.rows if r.include]
-        cats = category_summary(chosen)
+        cats = category_summary(r.category for r in self.rows if r.include)
         new = (f"{name} v{version} · today · by {self.store.contributor()[:8]} · exported: "
-               f"{label} · {len(chosen)} samples" + (f" · {cats}" if cats else ""))
+               f"{label} · {len(samples)} samples · {changes}" + (f" · {cats}" if cats else ""))
         ids = {s.id: s for s in self.store.all()}
         old = [e.line() for e in merge_logs(prov.series_log(name), prov.used_logs(ids))]
-        self.history.setPlainText("\n".join([new + "  (this export)"] + old))
+        self.history.setPlainText("\n".join(([] if unchanged else [new + "  (this export)"])
+                                            + old))
+
 
 
 class DeleteRangeDialog(QDialog):
@@ -419,7 +443,8 @@ class HistoryWindow(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         name = panel.pack_name()
-        version = self.data.provenance.next_version(name)
+        version, _changes, _same = release_preview(
+            self.data, name, [r.sample for r in rows if r.include])
         default = str(downloads_dir() / file_name(name, version))
         path = save_file(self, "Save OCR data pack", default, "OCR data pack (*.zip)")
         if path:
@@ -495,7 +520,10 @@ class HistoryWindow(QWidget):
         name = clean_name(name)
         if not ok or not name:
             return
-        version = self.data.provenance.next_version(name)
+        version, changes, unchanged = merge_release_preview(self.data, name, rows)
+        if unchanged:
+            QMessageBox.information(self, "Merge", f"No changes since {name} v{version}: it "
+                                    f"is saved again as v{version}, without a new version.")
         out = save_file(self, f"Save merged pack {name} v{version}",
                         str(downloads_dir() / file_name(name, version)), "OCR data pack (*.zip)")
         if not out:

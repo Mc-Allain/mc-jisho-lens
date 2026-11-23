@@ -79,34 +79,76 @@ def checked(store: OcrDataStore) -> list[Sample]:
     return [s for s in store.all() if s.checked]
 
 
+def release_content(samples: list[Sample]) -> dict[str, str]:
+    """What a release contains: {sample id: fingerprint of its answer and category}."""
+    from hashlib import sha1
+
+    return {s.id: sha1(f"{s.truth}\x00{s.category}".encode()).hexdigest()[:16]
+            for s in samples if is_shareable(s)}
+
+
+def describe_changes(old: dict | None, new: dict) -> tuple[str, bool]:
+    """("3 new, 1 changed, 1 removed", unchanged?) compared with the previous release."""
+    if old is None:
+        return "first release", False
+    added = len(new.keys() - old.keys())
+    removed = len(old.keys() - new.keys())
+    changed = sum(old[k] != new[k] for k in new.keys() & old.keys())
+    parts = [f"{n} {what}" for n, what in ((added, "new"), (changed, "changed"),
+                                            (removed, "removed")) if n]
+    return (", ".join(parts), False) if parts else ("no changes", True)
+
+
 def release_entry(store: OcrDataStore, name: str, action: str, sources: str,
-                  samples: list[Sample]) -> LogEntry:
-    """The history-log line of a new release of your pack `name` (next version)."""
+                  samples: list[Sample]) -> tuple[LogEntry, bool, dict, str]:
+    """The history-log line of a release of your pack `name`: the next version, or, when
+    nothing changed since the last one, that same version again. Returns (entry,
+    unchanged?, content, pack ID to use)."""
     from jisho_lens.core.categories import category_summary
 
     name = clean_name(name)
-    return LogEntry(name=name, version=store.provenance.next_version(name),
-                    date=time.strftime("%Y-%m-%dT%H:%M:%S"), contributor=store.contributor(),
-                    action=action, sources=sources, samples=len(samples),
-                    categories=category_summary(s.category for s in samples))
+    last, old, last_id = store.provenance.last_release(name)
+    content = release_content(samples)
+    changes, unchanged = describe_changes(old, content) if last else ("first release", False)
+    version = last if unchanged else last + 1
+    entry = LogEntry(name=name, version=version, date=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     contributor=store.contributor(), action=action, sources=sources,
+                     samples=len(content), categories=category_summary(
+                         s.category for s in samples if is_shareable(s)),
+                     changes=changes)
+    return entry, unchanged, content, (last_id if unchanged and last_id
+                                       else uuid.uuid4().hex)
+
+
+def release_preview(store: OcrDataStore, name: str, samples: list[Sample]) -> tuple[int, str,
+                                                                                     bool]:
+    """(version it will get, changes since the last version, unchanged?) for the screens."""
+    entry, unchanged, _content, _id = release_entry(store, name, "exported", "", samples)
+    return entry.version, entry.changes, unchanged
 
 
 def export_pack(store: OcrDataStore, path: Path, samples: list[Sample],
-                name: str | None = None, *, release: LogEntry | None = None,
+                name: str | None = None, *, release=None,
                 log: list[LogEntry] | None = None) -> int:
     """Write a pack. Samples not fixed with Edit are left out.
 
-    With `name`: the pack is the next version of your pack of that name; its history log
-    has this release, your earlier releases and the logs of the packs your data uses
-    (`release` / `log` are given by apply_merge instead)."""
+    With `name`: a release of your pack of that name: the next version with a new history
+    line, or, when nothing changed since the last version, that same version again (no new
+    line). Its history log has your releases and the logs of the packs your data uses.
+    (`release` / `log` are given by apply_merge instead.)"""
     samples = [s for s in samples if is_shareable(s)]
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if name and release is None:
         label, _uses, _own = store.using()
         release = release_entry(store, name, "exported", label, samples)
-        log = merge_logs([release], store.provenance.series_log(release.name),
+        entry, unchanged, _content, _pid = release
+        series = store.provenance.series_log(entry.name)
+        log = merge_logs([] if unchanged else [entry], series,
                          store.provenance.used_logs({s.id: s for s in store.all()}))
+    entry = unchanged = content = pack_id = None
+    if release is not None:
+        entry, unchanged, content, pack_id = release
     manifest = {
         "format": PACK_FORMAT,
         "version": FORMAT,
@@ -114,21 +156,25 @@ def export_pack(store: OcrDataStore, path: Path, samples: list[Sample],
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "contributor": store.contributor(),
         "samples": len(samples),
-        "pack_id": uuid.uuid4().hex,
+        "pack_id": pack_id or uuid.uuid4().hex,
     }
-    if release is not None:
-        manifest.update(name=release.name, series_version=release.version,
-                        sources=release.sources,
-                        log=[e.__dict__ for e in (log or [release])])
+    if entry is not None:
+        manifest.update(name=entry.name, series_version=entry.version,
+                        sources=entry.sources,
+                        log=[e.__dict__ for e in (log or [entry])])
     tmp = path.with_suffix(".part")
-    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("manifest.json", json.dumps(manifest, indent=1))
-        for s in samples:
-            zf.write(store.png_path(s.id), f"samples/{s.id}.png")
-            zf.writestr(f"samples/{s.id}.json", s.to_json())
-    tmp.replace(path)
-    if release is not None:
-        store.provenance.record_release(release)
+    try:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(manifest, indent=1))
+            for s in samples:
+                zf.write(store.png_path(s.id), f"samples/{s.id}.png")
+                zf.writestr(f"samples/{s.id}.json", s.to_json())
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if entry is not None and not unchanged:
+        store.provenance.record_release(entry, content, manifest["pack_id"])
     return len(samples)
 
 
@@ -611,13 +657,6 @@ def apply_merge(rows: list[ReviewRow], output: Path, contributor: str | None = N
         raise PackError("nothing to merge: no samples are ticked")
     for pack in {id(r.pack): r.pack for r in rows if r.include}.values():
         pack.check_unchanged()
-    release = log = None
-    if name and provenance_store is not None:
-        release = release_entry(provenance_store, name, "merged", merge_sources(rows),
-                                [r.sample for r in rows if r.include])
-        pack_logs = {id(r.pack): r.pack.info.log for r in rows if r.pack.info}
-        log = merge_logs([release], provenance_store.provenance.series_log(release.name),
-                         *pack_logs.values())
     with tempfile.TemporaryDirectory() as tmp:
         store = OcrDataStore(Path(tmp))
         if contributor:
@@ -635,14 +674,18 @@ def apply_merge(rows: list[ReviewRow], output: Path, contributor: str | None = N
             sample.alternatives = [a.as_alternative() for a in others]
             sample.needs_review = bool(others)
             store.save(sample, row.pack.image(row.sid))
-        if release is not None:
-            from jisho_lens.core.categories import category_summary
-
-            release.samples = len(store.all())
-            release.categories = category_summary(s.category for s in store.all())
+        release = log = None
+        if name and provenance_store is not None:
+            release = release_entry(provenance_store, name, "merged", merge_sources(rows),
+                                    store.all())
+            entry, unchanged = release[0], release[1]
+            pack_logs = {id(r.pack): r.pack.info.log for r in rows if r.pack.info}
+            log = merge_logs([] if unchanged else [entry],
+                             provenance_store.provenance.series_log(entry.name),
+                             *pack_logs.values())
         count = export_pack(store, output, store.all(), release=release, log=log)
-    if release is not None:
-        provenance_store.provenance.record_release(release)
+    if release is not None and not release[1]:
+        provenance_store.provenance.record_release(release[0], release[2], release[3])
     return count
 
 
@@ -705,3 +748,18 @@ def preview_import_label(store: OcrDataStore, rows: list[ReviewRow]) -> tuple[st
             after.append(PackUse(rec, len(used) + len(same), len(used), len(declined)))
     own = any(not s.source_pack_id and s.id not in taken for s in store.all())
     return now, using_label(after, own)
+
+
+def merge_release_preview(store: OcrDataStore, name: str, rows: list[ReviewRow]
+                          ) -> tuple[int, str, bool]:
+    """release_preview for a merge, from the rows as currently chosen."""
+    samples = []
+    for row in rows:
+        if not row.include:
+            continue
+        s = Sample.from_dict(json.loads(row.sample.to_json()))
+        chosen = (row.answers[row.choice] if isinstance(row.choice, int)
+                  and 0 <= row.choice < len(row.answers) else row.answers[0])
+        s.truth, s.truth_source = chosen.truth, "edited"
+        samples.append(s)
+    return release_preview(store, name, samples)

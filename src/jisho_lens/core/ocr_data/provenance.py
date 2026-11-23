@@ -47,6 +47,7 @@ class LogEntry:
     sources: str  # e.g. "RavenOCR v1 + own data"
     samples: int
     categories: str = ""  # "Categories: Azur Promilia JP 40, none 3"
+    changes: str = ""  # since the previous version: "3 new, 1 changed, 1 removed"
 
     @property
     def key(self) -> tuple:
@@ -55,6 +56,7 @@ class LogEntry:
     def line(self) -> str:
         return (f"{self.name} v{self.version} · {self.date[:10]} · by {self.contributor[:8]} · "
                 f"{self.action}: {self.sources or '—'} · {self.samples} samples"
+                + (f" · {self.changes}" if self.changes else "")
                 + (f" · {self.categories}" if self.categories else ""))
 
     @classmethod
@@ -66,7 +68,8 @@ class LogEntry:
                        action=str(d.get("action", "exported"))[:16],
                        sources=str(d.get("sources", ""))[:500],
                        samples=int(d.get("samples", 0)),
-                       categories=str(d.get("categories", ""))[:500])
+                       categories=str(d.get("categories", ""))[:500],
+                       changes=str(d.get("changes", ""))[:200])
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -237,7 +240,30 @@ class Provenance:
         entry = self._series().get(clean_name(name), {})
         return parse_log(entry.get("log")) if isinstance(entry, dict) else []
 
-    def record_release(self, entry: LogEntry) -> None:
+    def last_release(self, name: str) -> tuple[int, dict | None, str]:
+        """(last version, what it contained {sample id: fingerprint} or None if not known,
+        its pack ID) of your pack `name`."""
+        entry = self._series().get(clean_name(name), {})
+        if not isinstance(entry, dict):
+            return 0, None, ""
+        content = entry.get("content")
+        content = ({k: v for k, v in content.items() if isinstance(v, str)}
+                   if isinstance(content, dict) else None)
+        pack_id = entry.get("pack_id") if isinstance(entry.get("pack_id"), str) else ""
+        return self.next_version(name) - 1, content, pack_id
+
+    def reset_series(self, name: str) -> None:
+        """Start your pack `name` over: the next release is v1 with a new history log."""
+        data = self._read("series.json", {})
+        if not isinstance(data, dict):
+            data = {}
+        series = self._series()
+        series.pop(clean_name(name), None)
+        data["series"] = series
+        self._write("series.json", data)
+
+    def record_release(self, entry: LogEntry, content: dict | None = None,
+                       pack_id: str = "") -> None:
         data = self._read("series.json", {})
         if not isinstance(data, dict):
             data = {}
@@ -247,6 +273,10 @@ class Provenance:
             s = series[entry.name] = {"version": 0, "log": []}
         s["version"] = max(self.next_version(entry.name) - 1, entry.version)
         s["log"] = [asdict(e) for e in merge_logs([entry], parse_log(s.get("log")))]
+        if content is not None:
+            s["content"] = content
+        if pack_id:
+            s["pack_id"] = pack_id
         data["last_name"] = entry.name
         self._write("series.json", data)
 
