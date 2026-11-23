@@ -42,6 +42,7 @@ from jisho_lens.core.ocr_data import (
     review_import,
     review_merge,
     to_test_set,
+    unique_packs,
 )
 from jisho_lens.core.ocr_data.corrections import CorrectionStore
 from jisho_lens.core.ocr_data.packs import merge_sources, preview_import_label
@@ -55,7 +56,7 @@ from jisho_lens.ui.file_dialogs import (
     pick_folder,
     save_file,
 )
-from jisho_lens.ui.pack_review import PackReviewDialog
+from jisho_lens.ui.pack_review import PackReviewDialog, plain_tooltip
 
 _THUMB = QSize(220, 70)
 
@@ -312,7 +313,7 @@ class HistoryWindow(QWidget):
         self.data_stats.setText(text)
         label, _uses, _own = self.data.using()
         self.data_using.setText(f"<b>Using:</b> {html.escape(label)}")
-        self.data_using.setToolTip(self.data.using_details())
+        self.data_using.setToolTip(plain_tooltip(self.data.using_details()))
 
     def _current_id(self) -> int | None:
         item = self.list.currentItem()
@@ -456,9 +457,14 @@ class HistoryWindow(QWidget):
                 QMessageBox.information(self, "Merge", "Choose two or more packs.")
             return
         try:
-            packs = [read_pack(Path(p)) for p in paths]
+            packs, dropped = unique_packs([read_pack(Path(p)) for p in paths])
         except PackError as exc:
             QMessageBox.warning(self, "Merge", f"Not merged: {exc}")
+            return
+        if dropped:
+            QMessageBox.information(self, "Merge", "The same pack was chosen more than once; "
+                                    f"it is merged once. Left out: {', '.join(dropped)}")
+        if len(packs) < 2:
             return
         rows = review_merge(packs)
         skipped = sum(p.skipped for p in packs)

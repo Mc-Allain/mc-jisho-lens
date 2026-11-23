@@ -128,6 +128,7 @@ class JishoLens:
         self._last_image: Image.Image | None = None
         self._pending_job: int | None = None
         self._delay_timer: QTimer | None = None  # capture delay running (Esc cancels it)
+        self._starting = False  # between the hotkey and the selection overlay
         self._settings_window: SettingsWindow | None = None
         self._history_window = None
         # History (core) and OCR data collection (opt-in, local only)
@@ -171,14 +172,16 @@ class JishoLens:
         self.hotkey_ok, message = self.hotkeys.register(self.settings.capture.hotkey)
         self.show_hotkey_ok, show_message = self.hotkeys.register(
             self.settings.capture.show_hotkey, "show")
+        show_note = ""
         if not self.show_hotkey_ok:
             log.warning("show-window hotkey not set: %s", show_message)
+            show_note = f"\nShow/hide hotkey not set: {show_message}. Change it in Settings."
         if self.hotkey_ok:
-            self.tray.showMessage("Jisho Lens", f"Running. Press {message} to capture text.",
-                                  app_icon(), 4000)
+            self.tray.showMessage("Jisho Lens", f"Running. Press {message} to capture text."
+                                  + show_note, app_icon(), 6000 if show_note else 4000)
         else:
-            self.tray.showMessage("Jisho Lens", f"Hotkey not set: {message}. Open Settings.",
-                                  app_icon(), 6000)
+            self.tray.showMessage("Jisho Lens", f"Hotkey not set: {message}. Open Settings."
+                                  + show_note, app_icon(), 6000)
         self._update_tray_tooltip()
 
     @property
@@ -272,8 +275,15 @@ class JishoLens:
 
     # ---------- capture ----------
     def start_capture(self) -> None:
-        if self._overlay is not None:
-            return  # already selecting
+        if self._overlay is not None or self._starting:
+            return  # already selecting (or about to)
+        if self._delay_timer is not None:  # a capture still waiting: replaced by this one
+            self._delay_timer.stop()
+            self._delay_timer = None
+            self._exclude_children(False)
+            self._arm_cancel(False)
+            self.window.end_busy("Previous capture replaced")
+        self._starting = True
         if self.settings.window.on_capture == "close":
             changed = self._close_children()
         else:  # keep them open, but leave them out of the screenshot
@@ -362,6 +372,7 @@ class JishoLens:
         return bool(children)
 
     def _grab_and_select(self) -> None:
+        self._starting = False
         if self._overlay is not None:
             return
         try:
@@ -386,26 +397,29 @@ class JishoLens:
         elif self.settings.window.on_capture == "behind":
             self._children_in_front()
         if delay > 0:
-            self.window.show_busy(f"Waiting {delay:g} s… (Esc cancels)")
+            self.window.show_busy(f"Waiting {delay:g} s…")
             if self.settings.window.on_capture != "close":
                 self._exclude_children(True)  # open windows may cover the area meanwhile
             self._delay_timer = QTimer(singleShot=True)
             self._delay_timer.timeout.connect(lambda: self._delayed_grab(rect))
             self._delay_timer.start(int(delay * 1000))
-            self._arm_cancel(True)
+            if self._arm_cancel(True):
+                self.window.show_busy(f"Waiting {delay:g} s… (Esc cancels)")
         else:
             self._read(shot.crop(rect))
 
     # ---------- Esc cancels a capture ----------
-    def _arm_cancel(self, on: bool) -> None:
+    def _arm_cancel(self, on: bool) -> bool:
         """While a capture waits or is being read, Esc cancels it. Esc is a global hotkey
-        only for those seconds (the game keeps the focus), then it's released again."""
+        only for those seconds (the game keeps the focus), then it's released again.
+        Returns True when Esc is available (another program may hold it)."""
         if on:
             ok, message = self.hotkeys.register_key(ESC, "cancel")
             if not ok:
                 log.info("Esc to cancel unavailable: %s", message)
-        else:
-            self.hotkeys.unregister("cancel")
+            return ok
+        self.hotkeys.unregister("cancel")
+        return False
 
     def cancel_capture(self) -> None:
         """Esc while waiting or reading: drop the capture; the previous text stays."""
@@ -443,11 +457,12 @@ class JishoLens:
         engine = engine or self.settings.ocr.engine
         preset = preset or self.settings.ocr.preset
         self.window.set_engine_preset(engine, preset)
-        self.window.show_busy(f"Reading… ({engine}) · Esc cancels")
+        self.window.show_busy(f"Reading… ({engine})")
         self.window.set_corrections(0)
         self._applied = []
         self.tray.setIcon(app_icon(busy=True))
-        self._arm_cancel(True)
+        if self._arm_cancel(True):
+            self.window.show_busy(f"Reading… ({engine}) · Esc cancels")
         self._pending_job = self.ocr.submit(
             image, engine, preset,
             remove_key_icons=self.settings.capture.remove_key_icons,

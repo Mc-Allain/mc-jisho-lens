@@ -145,9 +145,20 @@ class ImportRecord:
     log: list[dict] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, d: dict) -> ImportRecord:
-        known = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in d.items() if k in known})
+    def from_dict(cls, d) -> ImportRecord | None:
+        """A record from imports.json; None when it is damaged."""
+        if not isinstance(d, dict) or not isinstance(d.get("pack_id"), str):
+            return None
+
+        def ids(v):
+            return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+        return cls(pack_id=d["pack_id"], label=str(d.get("label", "?"))[:100],
+                   contributor=str(d.get("contributor", ""))[:32],
+                   file=str(d.get("file", ""))[:260], imported=str(d.get("imported", "")),
+                   used=ids(d.get("used")), declined=ids(d.get("declined")),
+                   log=[x for x in d.get("log", []) if isinstance(x, dict)]
+                   if isinstance(d.get("log"), list) else [])
 
 
 @dataclass
@@ -200,34 +211,51 @@ class Provenance:
 
     # ---------- your pack names and versions ----------
     def last_name(self) -> str:
-        return str(self._read("series.json", {}).get("last_name", ""))
+        data = self._read("series.json", {})
+        return clean_name(data.get("last_name", "")) if isinstance(data, dict) else ""
+
+    def _series(self) -> dict:
+        data = self._read("series.json", {})
+        series = data.get("series", {}) if isinstance(data, dict) else {}
+        return series if isinstance(series, dict) else {}
 
     def next_version(self, name: str) -> int:
-        series = self._read("series.json", {}).get("series", {})
-        return int(series.get(clean_name(name), {}).get("version", 0)) + 1
+        entry = self._series().get(clean_name(name), {})
+        try:
+            last = int(entry.get("version", 0)) if isinstance(entry, dict) else 0
+        except (TypeError, ValueError):
+            last = 0
+        return max(0, last) + 1
 
     def series_log(self, name: str) -> list[LogEntry]:
-        series = self._read("series.json", {}).get("series", {})
-        return parse_log(series.get(clean_name(name), {}).get("log"))
+        entry = self._series().get(clean_name(name), {})
+        return parse_log(entry.get("log")) if isinstance(entry, dict) else []
 
     def record_release(self, entry: LogEntry) -> None:
         data = self._read("series.json", {})
-        series = data.setdefault("series", {})
-        s = series.setdefault(entry.name, {"version": 0, "log": []})
-        s["version"] = max(int(s.get("version", 0)), entry.version)
+        if not isinstance(data, dict):
+            data = {}
+        data["series"] = series = self._series()
+        s = series.get(entry.name)
+        if not isinstance(s, dict):
+            s = series[entry.name] = {"version": 0, "log": []}
+        s["version"] = max(self.next_version(entry.name) - 1, entry.version)
         s["log"] = [asdict(e) for e in merge_logs([entry], parse_log(s.get("log")))]
         data["last_name"] = entry.name
         self._write("series.json", data)
 
     # ---------- imported packs ----------
     def records(self) -> list[ImportRecord]:
-        raw = self._read("imports.json", {}).get("imports", [])
+        data = self._read("imports.json", {})
+        raw = data.get("imports", []) if isinstance(data, dict) else []
         out = []
         for d in raw if isinstance(raw, list) else []:
             try:
-                out.append(ImportRecord.from_dict(d))
-            except TypeError:
+                rec = ImportRecord.from_dict(d)
+            except (TypeError, ValueError):
                 continue
+            if rec is not None:
+                out.append(rec)
         return out
 
     def record_import(self, info: PackInfo, used: list[str], declined: list[str]) -> None:

@@ -53,6 +53,7 @@ from jisho_lens.core.ocr_data import (  # noqa: E402  # noqa: E402
     review_import,
     review_merge,
     to_test_set,
+    unique_packs,
 )
 from jisho_lens.core.ocr_data.corrections import CorrectionStore  # noqa: E402
 from jisho_lens.core.ocr_data.packs import merge_sources, preview_import_label  # noqa: E402
@@ -144,7 +145,12 @@ def main(argv: list[str]) -> int:
             if not name:
                 print("give your pack a name: --name RavenOCR")
                 return 2
-            packs = [read_pack(Path(p)) for p in args.packs]
+            packs, dropped = unique_packs([read_pack(Path(p)) for p in args.packs])
+            if dropped:
+                print(f"the same pack was given more than once; left out: {', '.join(dropped)}")
+            if len(packs) < 2:
+                print("give two or more different packs to merge")
+                return 2
             rows = review_merge(packs)
             for row in rows:
                 if row.status == SAME_SENTENCE and args.same_sentence:

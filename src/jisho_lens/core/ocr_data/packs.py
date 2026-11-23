@@ -23,6 +23,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,6 +142,7 @@ class Pack:
     sizes: dict[str, int]  # PNG size per sample id
     skipped: int = 0  # samples without an Edit fix (not offered)
     info: PackInfo | None = None  # name, version, history log
+    stamp: tuple = ()  # (size, modified time) of the file when it was checked
 
     @property
     def label(self) -> str:
@@ -150,10 +152,23 @@ class Pack:
     def name(self) -> str:
         return self.path.name
 
+    def check_unchanged(self) -> None:
+        """Raise PackError if the file was moved, deleted or replaced since it was checked
+        (before anything is written)."""
+        try:
+            st = self.path.stat()
+        except OSError as exc:
+            raise PackError(f"{self.name} is no longer there (moved or deleted)") from exc
+        if self.stamp and (st.st_size, st.st_mtime_ns) != self.stamp:
+            raise PackError(f"{self.name} changed after it was checked; open it again")
+
     def image(self, sid: str) -> bytes:
         """The PNG of a sample, checked again against its name."""
-        with zipfile.ZipFile(self.path) as zf:
-            data = zf.read(f"samples/{sid}.png")
+        try:
+            with zipfile.ZipFile(self.path) as zf:
+                data = zf.read(f"samples/{sid}.png")
+        except (OSError, KeyError, EOFError, zipfile.BadZipFile, zlib.error) as exc:
+            raise PackError(f"can't read a picture from {self.name}: {exc}") from exc
         if sample_id(data) != sid:
             raise PackError(f"image changed since it was checked: {sid}")
         return data
@@ -164,9 +179,32 @@ def read_pack(path: Path) -> Pack:
     PackError. Nothing is written; images are read again from the pack when applied."""
     path = Path(path)
     try:
-        zf = zipfile.ZipFile(path)
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise PackError(f"not a data pack: {exc}") from exc
+        st = path.stat()
+        return _read_pack(path, (st.st_size, st.st_mtime_ns))
+    except PackError:
+        raise
+    except (OSError, EOFError, zipfile.BadZipFile, zlib.error, RuntimeError, ValueError,
+            TypeError, KeyError) as exc:  # damaged zip data, odd values
+        raise PackError(f"damaged or not a data pack: {exc}") from exc
+
+
+def _str(value, optional: bool = False) -> bool:
+    return isinstance(value, str) or (optional and value is None)
+
+
+def _valid_sample(s: Sample) -> bool:
+    """Types a pack must use (so nothing odd reaches the screens or your data)."""
+    return (_str(s.ocr_text) and _str(s.truth, True) and _str(s.truth_source, True)
+            and _str(s.speaker, True) and _str(s.contributor) and _str(s.category)
+            and _str(s.engine) and _str(s.preset) and _str(s.text_type)
+            and isinstance(s.screen, dict) and isinstance(s.needs_review, bool)
+            and isinstance(s.alternatives, list)
+            and all(isinstance(a, dict) and _str(a.get("truth"), True)
+                    and _str(a.get("contributor", ""), True) for a in s.alternatives))
+
+
+def _read_pack(path: Path, stamp: tuple) -> Pack:
+    zf = zipfile.ZipFile(path)
     with zf:
         infos = zf.infolist()
         if len(infos) > MAX_FILES:
@@ -190,7 +228,11 @@ def read_pack(path: Path) -> Pack:
             raise PackError("bad manifest.json") from exc
         if not isinstance(manifest, dict) or manifest.get("format") != PACK_FORMAT:
             raise PackError("not a Jisho Lens OCR data pack")
-        if int(manifest.get("version", 0)) > FORMAT:
+        try:
+            version = int(manifest.get("version", 0))
+        except (TypeError, ValueError) as exc:
+            raise PackError("bad manifest.json (version)") from exc
+        if version > FORMAT:
             raise PackError("pack made by a newer version of Jisho Lens")
         samples: dict[str, Sample] = {}
         sizes: dict[str, int] = {}
@@ -217,8 +259,7 @@ def read_pack(path: Path) -> Pack:
                     sample = Sample.from_dict(json.loads(data))
                 except (ValueError, TypeError) as exc:
                     raise PackError(f"bad sample data: {name}") from exc
-                if sample.id != sid or not isinstance(sample.ocr_text, str) \
-                        or not isinstance(sample.alternatives, list):
+                if sample.id != sid or not _valid_sample(sample):
                     raise PackError(f"bad sample data: {name}")
                 samples[sid] = sample
         missing = set(samples) - set(sizes)
@@ -227,7 +268,21 @@ def read_pack(path: Path) -> Pack:
     shareable = {sid: s for sid, s in samples.items() if is_shareable(s)}
     info = PackInfo.from_manifest(manifest, path.name, samples.keys())
     return Pack(path, manifest, shareable, sizes, skipped=len(samples) - len(shareable),
-                info=info)
+                info=info, stamp=stamp)
+
+
+def unique_packs(packs: list[Pack]) -> tuple[list[Pack], list[str]]:
+    """The same pack chosen twice (e.g. two copies of one file) counts once. Returns
+    (packs, file names left out)."""
+    seen, out, dropped = set(), [], []
+    for pack in packs:
+        key = pack.info.pack_id if pack.info else str(pack.path)
+        if key in seen:
+            dropped.append(pack.name)
+        else:
+            seen.add(key)
+            out.append(pack)
+    return out, dropped
 
 
 # ---------------------------------------------------------------- review rows
@@ -299,7 +354,7 @@ def review_import(store: OcrDataStore, pack: Pack) -> list[ReviewRow]:
         if local is None:
             other = store.find_text(s.ocr_text)
             key = _key(s.ocr_text)
-            if other is not None or key in seen_keys:
+            if other is not None or (key and key in seen_keys):
                 rows.append(ReviewRow(sid, SAME_SENTENCE, s.ocr_text,
                                       other.truth if other else None, answers, s, pack,
                                       include=False, local_id=other.id if other else None))
@@ -339,12 +394,13 @@ def review_merge(packs: list[Pack]) -> list[ReviewRow]:
                     row.status, row.choice = DIFFERS, ALL_ANSWERS
                 continue
             key = _key(s.ocr_text)
-            if key in first_by_key:
+            if key and key in first_by_key:
                 row = ReviewRow(sid, SAME_SENTENCE, s.ocr_text,
                                 by_id[first_by_key[key]].after, answers, s, pack,
                                 include=False, local_id=first_by_key[key])
             else:
-                first_by_key[key] = sid
+                if key:
+                    first_by_key[key] = sid
                 status = DIFFERS if len(answers) > 1 else NEW
                 row = ReviewRow(sid, status, s.ocr_text, None, answers, s, pack,
                                 choice=ALL_ANSWERS if status == DIFFERS else KEEP_MINE)
@@ -386,6 +442,8 @@ def apply_export(store: OcrDataStore, rows: list[ReviewRow], path: Path,
                  name: str | None = None) -> int:
     """Export the included rows, each labelled with its category (blank = none). The
     categories are also saved on your samples, so the next export starts from them."""
+    if not any(r.include for r in rows):
+        raise PackError("nothing to export: no samples are ticked")
     samples = []
     for row in rows:
         store.set_category(row.sid, row.category)
@@ -451,6 +509,9 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
                  ) -> ImportResult:
     """Write the included rows as chosen. `corrections` (a CorrectionStore) also learns
     the OCR fixes of the imported answers ("Also learn OCR fixes from these")."""
+    for pack in {id(r.pack): r.pack for r in rows if r.include}.values():
+        if isinstance(pack, Pack):
+            pack.check_unchanged()  # before anything is written
     result = ImportResult()
     for row in rows:
         if not row.include or row.status == SAME:
@@ -496,7 +557,8 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
                 and not (r.status == DIFFERS and r.choice == KEEP_MINE)]
         same = [r.sid for r in mine if r.status == SAME]
         declined = [r.sid for r in mine if _declined(r)]
-        if used or same or declined:
+        mine_pack = pack.info is not None and pack.info.contributor == store.contributor()
+        if (used or same or declined) and pack.info is not None and not mine_pack:
             store.provenance.record_import(pack.info, used + same, declined)
     if corrections is not None:
         for ocr_text, truth in result.fixed:
@@ -529,6 +591,10 @@ def apply_merge(rows: list[ReviewRow], output: Path, contributor: str | None = N
 
     With `name` and `provenance_store` (your data): the merged pack is the next version of
     your pack `name`, and its history log has the logs of every merged pack."""
+    if not any(r.include for r in rows):
+        raise PackError("nothing to merge: no samples are ticked")
+    for pack in {id(r.pack): r.pack for r in rows if r.include}.values():
+        pack.check_unchanged()
     release = log = None
     if name and provenance_store is not None:
         release = release_entry(provenance_store, name, "merged", merge_sources(rows),

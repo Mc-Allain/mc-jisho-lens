@@ -28,6 +28,7 @@ from jisho_lens.core.ocr_data.packs import (
     review_merge,
     select,
     to_test_set,
+    unique_packs,
 )
 from jisho_lens.core.ocr_data.store import OcrDataStore, Sample
 
@@ -36,4 +37,4 @@ __all__ = ["ALL_ANSWERS", "DIFFERS", "KEEP_ALTERNATIVE", "KEEP_MINE", "NEW", "SA
            "Pack", "PackError", "ReviewRow", "Sample", "apply_export", "apply_import",
            "apply_merge", "label_rows", "review_export",
            "export_pack", "import_pack", "is_shareable", "merge_packs", "read_pack",
-           "review_import", "review_merge", "select", "to_test_set"]
+           "review_import", "review_merge", "select", "to_test_set", "unique_packs"]

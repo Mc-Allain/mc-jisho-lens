@@ -127,6 +127,11 @@ class _ImageView(QDialog):
         self.resize(min(pixmap.width() + 40, 1400), min(pixmap.height() + 60, 900))
 
 
+def plain_tooltip(text: str) -> str:
+    """Hover text shown exactly as written (text from packs must not act as formatting)."""
+    return "<qt>" + _esc(text) + "</qt>"
+
+
 class CategoryBox(QComboBox):
     """Type a category, or pick one: the defaults (Azur Promilia JP) and those in use."""
 
@@ -318,14 +323,15 @@ class PackReviewDialog(QDialog):
         """'RavenOCR v2 · by 58d34512 · 120 samples   [History…]'."""
         info = pack.info
         row = QHBoxLayout()
-        who = f" · by {info.contributor[:8]}" if info and info.contributor else ""
+        who = f" · by {html.escape(info.contributor[:8])}" if info and info.contributor \
+            else ""
         extra = "" if info and info.has_history else " · no history (older pack)"
         label = QLabel(f"<b>{html.escape(pack.label)}</b>{who} · "
                        f"{len(pack.samples)} samples · file {html.escape(pack.name)}{extra}")
         row.addWidget(label, 1)
         if info and info.log:
             button = QPushButton("History…")
-            button.setToolTip(info.history_text())
+            button.setToolTip(plain_tooltip(info.history_text()))
             button.clicked.connect(lambda _=False, i=info: self._show_history(i))
             row.addWidget(button)
         return row

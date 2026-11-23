@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import threading
 import time
@@ -92,20 +93,27 @@ class OcrDataStore:
     def contributor(self) -> str:
         """Anonymous random ID for this copy of the app (used in exported packs)."""
         path = self.folder / "contributor.txt"
-        if not path.exists():
+        try:
+            current = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            current = ""
+        if not re.fullmatch(r"[0-9a-f]{8,64}", current):  # missing or damaged: a new one
+            current = uuid.uuid4().hex[:16]
             self.folder.mkdir(parents=True, exist_ok=True)
-            path.write_text(uuid.uuid4().hex[:16], encoding="utf-8")
-        return path.read_text(encoding="utf-8").strip()
+            path.write_text(current, encoding="utf-8")
+        return current
 
     # ---------- read ----------
     def png_path(self, sid: str) -> Path:
         return self.samples_dir / f"{sid}.png"
 
     def get(self, sid: str) -> Sample | None:
+        """The sample, or None if it doesn't exist or its file is damaged."""
         path = self.samples_dir / f"{sid}.json"
-        if not path.exists():
+        try:
+            return Sample.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
             return None
-        return Sample.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def all(self) -> list[Sample]:
         if self._cache is None:
