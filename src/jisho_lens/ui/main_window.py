@@ -7,9 +7,10 @@ furigana sits over kanji, and a romaji line can be shown under each line.
 from __future__ import annotations
 
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QGuiApplication
+from PySide6.QtGui import QCloseEvent, QFont, QFontMetrics, QGuiApplication
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -26,6 +27,68 @@ from jisho_lens.core.ocr.preprocess import PRESETS
 from jisho_lens.dictionary.enrich import PageDictionary
 from jisho_lens.ui.render import page_for_message, page_for_plain, page_for_tokens
 from jisho_lens.ui.winapi import exclude_from_capture
+
+# Button colors by what the button does (tinted fill + colored border and text, readable on
+# the dark window). Checked toggles (Furigana, Romaji, ★ Favorite, Edit while editing) fill.
+BUTTON_COLORS = {
+    "capture": "#4a8fe7",  # Re-capture, Retry: read the text again
+    "edit": "#e0a030",  # Edit / Done
+    "copy": "#3fb6a8",
+    "confirm": "#5cbf6a",  # ✓ Correct
+    "favorite": "#e8c547",
+    "history": "#a27be0",
+    "undo": "#e07b4a",  # Undo applied corrections
+    "display": "#6fb3e0",  # Furigana, Romaji
+    "settings": "#8a8f99",
+}
+
+
+def _rgba(color: str, alpha: float) -> str:
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+ENGINE_HELP = {
+    "windows": "Windows OCR: built in, very fast, least accurate",
+    "rapid-v6": "RapidOCR v6: most accurate on game text (default)",
+    "rapid-v5-server": "RapidOCR v5 server: large model, very slow, sometimes reads ゛ better",
+    "rapid-v4-japan": "RapidOCR v4 Japanese: fast, less accurate",
+}
+PRESET_HELP = {
+    "none": "As captured (usually best)",
+    "upscale": "Enlarged: helps very small text",
+    "contrast": "Stronger contrast: helps faint text",
+    "white-text": "For white text on a busy background",
+    "auto": "Picks a filter from the image",
+}
+
+_BUTTON_PADDING = 10  # px left and right, as in button_style()
+
+
+def _fit_bold(button: QPushButton, texts) -> None:
+    """Minimum width that fits each of `texts` in bold (the "on" look), so the text isn't
+    cut off when the button fills; the button doesn't change size between states."""
+    font = QFont(button.font())
+    font.setBold(True)
+    metrics = QFontMetrics(font)
+    widest = max(metrics.horizontalAdvance(t) for t in texts)
+    button.setMinimumWidth(widest + 2 * _BUTTON_PADDING + 2 + 6)  # + border, breathing room
+
+
+def button_style() -> str:
+    css = []
+    for role, c in BUTTON_COLORS.items():
+        sel = f'QPushButton[role="{role}"]'
+        css.append(
+            f"{sel} {{ background: {_rgba(c, 0.16)}; border: 1px solid {_rgba(c, 0.75)};"
+            f" color: {c}; border-radius: 4px; padding: 3px 10px; }}"
+            f"{sel}:hover {{ background: {_rgba(c, 0.30)}; border-color: {c}; }}"
+            f"{sel}:pressed {{ background: {_rgba(c, 0.45)}; }}"
+            f"{sel}:checked, {sel}[active=\"true\"] {{ background: {_rgba(c, 0.85)};"
+            f" border-color: {c}; color: #15171b; font-weight: bold; }}"
+            f"{sel}:disabled {{ background: transparent; border-color: #3a3d44;"
+            f" color: #5d616b; }}")
+    return "".join(css)
 
 
 class MainWindow(QWidget):
@@ -106,28 +169,72 @@ class MainWindow(QWidget):
         self.favorite_btn.clicked.connect(self._favorite_clicked)
         self.engine_box = QComboBox()
         self.engine_box.addItems(ENGINE_NAMES)
+        self.engine_box.setToolTip("OCR engine: the program that reads the text in the image")
+        for i, name in enumerate(ENGINE_NAMES):
+            self.engine_box.setItemData(i, ENGINE_HELP.get(name, ""), Qt.ItemDataRole.ToolTipRole)
         self.preset_box = QComboBox()
         self.preset_box.addItems(PRESETS)
+        self.preset_box.setToolTip("Image filter: how the captured image is prepared before "
+                                   "the OCR engine reads it")
+        for i, name in enumerate(PRESETS):
+            self.preset_box.setItemData(i, PRESET_HELP.get(name, ""), Qt.ItemDataRole.ToolTipRole)
+        engine_label = QLabel("OCR engine")
+        engine_label.setBuddy(self.engine_box)
+        preset_label = QLabel("Image filter")
+        preset_label.setBuddy(self.preset_box)
+        for label in (engine_label, preset_label):
+            label.setStyleSheet("color: #8a8f99; font-size: 12px;")
         self.retry_btn = QPushButton("Retry")
-        self.retry_btn.setToolTip("Read the same capture again with this engine and preset")
+        self.retry_btn.setToolTip("Read the same capture again with this OCR engine and "
+                                  "image filter")
         self.settings_btn = QPushButton("Settings")
-        bottom = QHBoxLayout()
+        # bottom bar: actions on the left, OCR controls on the right; on a narrow window the
+        # OCR controls wrap to a second row (see _fit_bottom_bar)
+        self.actions_bar = QWidget()
+        actions = QHBoxLayout(self.actions_bar)
+        actions.setContentsMargins(0, 0, 0, 0)
         for w in (self.recapture_btn, self.edit_btn, self.copy_btn, self.confirm_btn,
                   self.favorite_btn, self.history_btn):
-            bottom.addWidget(w)
-        bottom.addStretch(1)
-        for w in (self.engine_box, self.preset_box, self.retry_btn, self.settings_btn):
-            bottom.addWidget(w)
+            actions.addWidget(w)
+        actions.addStretch(1)
+        self.ocr_bar = QWidget()
+        ocr = QHBoxLayout(self.ocr_bar)
+        ocr.setContentsMargins(0, 0, 0, 0)
+        ocr.addStretch(1)
+        for w in (engine_label, self.engine_box):
+            ocr.addWidget(w)
+        ocr.addSpacing(6)
+        for w in (preset_label, self.preset_box, self.retry_btn, self.settings_btn):
+            ocr.addWidget(w)
+        self.bottom = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.bottom.addWidget(self.actions_bar, 1)
+        self.bottom.addWidget(self.ocr_bar)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 8)
         layout.addLayout(top)
         layout.addWidget(self.stack, 1)
-        layout.addLayout(bottom)
+        layout.addLayout(self.bottom)
+        roles = {
+            "capture": (self.recapture_btn, self.retry_btn), "edit": (self.edit_btn,),
+            "copy": (self.copy_btn,), "confirm": (self.confirm_btn,),
+            "favorite": (self.favorite_btn,), "history": (self.history_btn,),
+            "undo": (self.undo_btn,), "display": (self.furigana_btn, self.romaji_btn),
+            "settings": (self.settings_btn,),
+        }
+        # every text a button can show (its width must fit the widest one, in bold)
+        texts = {self.edit_btn: ("Edit", "Done"),
+                 self.favorite_btn: ("☆ Favorite", "★ Favorite"),
+                 self.confirm_btn: ("✓ Correct", "✓ Saved")}
+        for role, buttons in roles.items():
+            for b in buttons:
+                b.setProperty("role", role)
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
+                _fit_bold(b, texts.get(b, (b.text(),)))
         self.setStyleSheet(
             "QWidget { background: #25272d; color: #e6e6e6; }"
             "QPushButton, QComboBox { padding: 3px 8px; }"
-            "QPushButton:checked { background: #3d5a8a; }"
+            + button_style()
         )
 
         self.recapture_btn.clicked.connect(self.recapture_requested)
@@ -233,6 +340,13 @@ class MainWindow(QWidget):
             w.setEnabled(enabled)
 
     # ---------- edit / copy ----------
+    @staticmethod
+    def _set_active(button: QPushButton, active: bool) -> None:
+        """Filled look for a button that is "on" without being checkable (Edit → Done)."""
+        button.setProperty("active", "true" if active else "false")
+        button.style().unpolish(button)
+        button.style().polish(button)
+
     def _toggle_edit(self) -> None:
         if self.stack.currentWidget() is self.editor:
             self._leave_edit_mode(save=True)
@@ -240,6 +354,7 @@ class MainWindow(QWidget):
             self.editor.setPlainText(self.text())
             self.stack.setCurrentWidget(self.editor)
             self.edit_btn.setText("Done")
+            self._set_active(self.edit_btn, True)
             self.activateWindow()
             self.editor.setFocus()
 
@@ -248,6 +363,7 @@ class MainWindow(QWidget):
             return
         self.stack.setCurrentWidget(self.view)
         self.edit_btn.setText("Edit")
+        self._set_active(self.edit_btn, False)
         if save:
             new_lines = [ln.strip() for ln in self.editor.toPlainText().splitlines()
                          if ln.strip()]
@@ -286,7 +402,19 @@ class MainWindow(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._fit_bottom_bar()
         self._geometry_timer.start()
+
+    def _fit_bottom_bar(self) -> None:
+        """One row when everything fits, otherwise the OCR controls go to a second row."""
+        m = self.layout().contentsMargins()
+        room = self.width() - m.left() - m.right()
+        need = (self.actions_bar.minimumSizeHint().width() + self.bottom.spacing()
+                + self.ocr_bar.minimumSizeHint().width())
+        direction = (QBoxLayout.Direction.LeftToRight if room >= need
+                     else QBoxLayout.Direction.TopToBottom)
+        if self.bottom.direction() != direction:
+            self.bottom.setDirection(direction)
 
     def _emit_geometry(self) -> None:
         g = self.geometry()
