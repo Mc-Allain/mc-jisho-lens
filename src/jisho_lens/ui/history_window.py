@@ -31,15 +31,19 @@ from jisho_lens.core.history import HistoryStore
 from jisho_lens.core.ocr_data import (
     OcrDataStore,
     PackError,
+    apply_import,
+    apply_merge,
     export_pack,
-    import_pack,
-    merge_packs,
+    read_pack,
+    review_import,
+    review_merge,
     select,
     to_test_set,
 )
 from jisho_lens.core.ocr_data.corrections import CorrectionStore
 from jisho_lens.core.settings import Settings
 from jisho_lens.core.storage import clear_all
+from jisho_lens.ui.pack_review import PackReviewDialog
 
 _THUMB = QSize(220, 70)
 
@@ -59,9 +63,6 @@ class ExportPreview(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Export OCR data pack")
         self.store = store
-        self.which = QComboBox()
-        self.which.addItem("Checked samples only (✓ or edited)", "checked")
-        self.which.addItem("All samples", "all")
         self.game = QLineEdit()
         self.game.setPlaceholderText("All games")
         self.list = QListWidget()
@@ -69,6 +70,9 @@ class ExportPreview(QDialog):
         self.list.setIconSize(_THUMB)
         self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.count = QLabel()
+        what = QLabel("Only samples you fixed with <b>Edit</b> are exported. Samples OCR "
+                      "read right (✓) or never checked stay on this computer.")
+        what.setWordWrap(True)
         note = QLabel("Check the pictures before sharing: screenshots can contain player "
                       "names or chat. Game screenshots belong to the game's publisher, so "
                       "share packs privately.")
@@ -80,32 +84,31 @@ class ExportPreview(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Export"))
-        row.addWidget(self.which, 1)
         row.addWidget(QLabel("Game"))
         row.addWidget(self.game, 1)
         layout = QVBoxLayout(self)
+        layout.addWidget(what)
         layout.addLayout(row)
         layout.addWidget(self.list, 1)
         layout.addWidget(self.count)
         layout.addWidget(note)
         layout.addWidget(buttons)
         self.resize(760, 520)
-        self.which.currentIndexChanged.connect(self.reload)
         self.game.textChanged.connect(self.reload)
         self.reload()
 
     def samples(self):
-        return select(self.store, self.which.currentData(), self.game.text().strip() or None)
+        return select(self.store, self.game.text().strip() or None)
 
     def reload(self) -> None:
         self.list.clear()
         samples = self.samples()
         for s in samples[:500]:
-            item = QListWidgetItem(_thumb(self.store.png_path(s.id)), (s.truth or s.ocr_text)[:30])
+            item = QListWidgetItem(_thumb(self.store.png_path(s.id)), (s.truth or "")[:30])
             self.list.addItem(item)
         more = " (showing 500)" if len(samples) > 500 else ""
-        self.count.setText(f"{len(samples)} samples will be exported{more}.")
+        self.count.setText(f"{len(samples)} samples fixed with Edit will be exported{more}."
+                           if samples else "No samples fixed with Edit yet: nothing to export.")
         self.save_btn.setEnabled(bool(samples))
 
 
@@ -387,12 +390,30 @@ class HistoryWindow(QWidget):
         if not path:
             return
         try:
-            result = import_pack(self.data, Path(path))
+            pack = read_pack(Path(path))
+            rows = review_import(self.data, pack)
         except PackError as exc:
             QMessageBox.warning(self, "Import", f"Not imported: {exc}")
             return
+        if not rows:
+            QMessageBox.information(self, "Import", "Nothing to import: the pack has no samples "
+                                    f"fixed with Edit ({pack.skipped} others left out).")
+            return
+        used = self.data.size_bytes() / 1024 / 1024
+        dlg = PackReviewDialog(rows, "import", title=f"Review import — {pack.name}",
+                               skipped=pack.skipped, space=(used, self.settings.data.max_mb),
+                               parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            result = apply_import(self.data, rows,
+                                  self.corrections if dlg.learn_fixes else None)
+        except PackError as exc:
+            QMessageBox.warning(self, "Import", f"Import stopped: {exc}")
+            return
         QMessageBox.information(self, "Import", result.summary())
         self._refresh_data()
+        self.changed.emit()
 
     def _merge(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Choose packs to merge", str(Path.home()),
@@ -401,18 +422,33 @@ class HistoryWindow(QWidget):
             if paths:
                 QMessageBox.information(self, "Merge", "Choose two or more packs.")
             return
+        try:
+            packs = [read_pack(Path(p)) for p in paths]
+        except PackError as exc:
+            QMessageBox.warning(self, "Merge", f"Not merged: {exc}")
+            return
+        rows = review_merge(packs)
+        skipped = sum(p.skipped for p in packs)
+        if not rows:
+            QMessageBox.information(self, "Merge", "Nothing to merge: the packs have no "
+                                    "samples fixed with Edit.")
+            return
+        dlg = PackReviewDialog(rows, "merge", title=f"Review merge — {len(packs)} packs",
+                               skipped=skipped, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
         out, _ = QFileDialog.getSaveFileName(
             self, "Save merged pack", str(Path.home() / "jisho-lens-ocr-merged.zip"),
             "OCR data pack (*.zip)")
         if not out:
             return
         try:
-            count, result = merge_packs([Path(p) for p in paths], Path(out))
+            count = apply_merge(rows, Path(out), self.data.contributor())
         except PackError as exc:
             QMessageBox.warning(self, "Merge", f"Not merged: {exc}")
             return
-        QMessageBox.information(self, "Merge", f"Merged pack with {count} samples.\n"
-                                                f"{result.summary()}")
+        QMessageBox.information(self, "Merge", f"Merged pack with {count} samples saved to\n"
+                                                f"{out}")
 
     def _test_set(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Folder for the OCR test set",
