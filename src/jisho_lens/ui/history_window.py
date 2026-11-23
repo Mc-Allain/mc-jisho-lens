@@ -337,6 +337,10 @@ class HistoryWindow(QWidget):
         favorite = not all(f for _, f in sel)
         for cid, _ in sel:
             self.history.set_favorite(cid, favorite)
+        if favorite:  # the star protects the sample with each capture's own text
+            from jisho_lens.core.storage import relink_captures
+
+            relink_captures(self.history, self.data, {cid for cid, _ in sel})
         self.refresh()
         self.changed.emit()
 

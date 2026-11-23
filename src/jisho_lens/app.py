@@ -144,6 +144,7 @@ class JishoLens:
         if self.settings.data.collecting and not self.corrections.path.exists():
             self._learn_from_samples()
         self._tidy_ocr_data()
+        self._relink_captures()
         self._retrying = False
 
         # single instance server
@@ -529,7 +530,7 @@ class JishoLens:
                 self._sample_id = self.ocr_data.add_capture(
                     job.image, raw, engine=job.engine, preset=job.preset,
                     seconds=round(outcome.seconds, 3), speaker=speaker,
-                    screen=_screen_info(), png=png)
+                    screen=_screen_info(), png=png, shown=shown)
                 if self._sample_id == sample_id(png):
                     same_file = self.ocr_data.png_path(self._sample_id)
             except Exception:  # noqa: BLE001
@@ -570,6 +571,14 @@ class JishoLens:
         if self._capture_id is None:
             return
         self.history.set_favorite(self._capture_id, favorite)
+        if favorite:  # the star protects the sample with this capture's text
+            try:
+                from jisho_lens.core.storage import relink_captures
+
+                relink_captures(self.history, self.ocr_data, {self._capture_id})
+                self._sample_id = self.history.get(self._capture_id).sample_id
+            except Exception:  # noqa: BLE001
+                log.exception("relinking the favorite failed")
         self.window.status_label.setText(
             "Added to favorites ★" if favorite else "Removed from favorites")
         if self._history_window is not None:
@@ -615,7 +624,8 @@ class JishoLens:
             self._data_manager.raise_()
             return
         parent = self._history_window if self._history_window is not None else None
-        dlg = DataManagerWindow(self.ocr_data, self.history.favorite_sample_ids, parent)
+        dlg = DataManagerWindow(self.ocr_data, self.history.sample_usage, parent,
+                                on_answer=self.history.sync_text)
         dlg.setWindowIcon(app_icon())
         dlg.changed.connect(self._on_data_managed)
         dlg.finished.connect(lambda _=0: setattr(self, "_data_manager", None))
@@ -691,6 +701,8 @@ class JishoLens:
             self.history.set_edited(self._capture_id, text)
         if self._sample_id:
             self.ocr_data.set_truth(self._sample_id, text, "edited")
+            # other captures of the same sentence show the corrected text too
+            self.history.sync_text(self._sample_id, text, except_id=self._capture_id)
             status = "Edited · correction saved"
             if self.settings.data.collecting:
                 try:
@@ -724,6 +736,22 @@ class JishoLens:
             marker.write_text("ok", encoding="utf-8")
         except Exception:  # noqa: BLE001
             log.exception("tidying OCR data failed")
+
+    def _relink_captures(self) -> None:
+        """Once: captures linked to a sample with a different answer than they show get the
+        right sample (see storage.relink_captures)."""
+        marker = self.ocr_data.folder / "relink-1.done"
+        if marker.exists() or not self.ocr_data.samples_dir.exists():
+            return
+        try:
+            from jisho_lens.core.storage import relink_captures
+
+            relinked, created = relink_captures(self.history, self.ocr_data)
+            log.info("OCR data: relinked %d captures (%d kept as their own samples)",
+                     relinked, created)
+            marker.write_text("ok", encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            log.exception("relinking captures failed")
 
     def _learn_from_samples(self) -> None:
         """Learn from corrections saved before this feature existed (runs once)."""

@@ -143,6 +143,30 @@ class HistoryStore:
                                     "sample_id IS NOT NULL").fetchall()
         return {r[0] for r in rows}
 
+    def sample_usage(self) -> dict[str, list[tuple[int, float, bool]]]:
+        """{sample id: [(capture id, time, favorite), ...]}: which History captures use each
+        OCR data sample. Captures of the same sentence share one sample, so a sample's
+        picture can be from an earlier capture."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT sample_id, id, created_at, favorite FROM captures "
+                "WHERE sample_id IS NOT NULL ORDER BY created_at DESC").fetchall()
+        out: dict[str, list[tuple[int, float, bool]]] = {}
+        for sid, cid, created, fav in rows:
+            out.setdefault(sid, []).append((cid, created, bool(fav)))
+        return out
+
+    def sync_text(self, sample_id: str, text: str, except_id: int | None = None) -> int:
+        """The right answer of an OCR data sample changed: every History capture using that
+        sample shows it (as its edited text). Returns how many captures changed."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE captures SET edited_text = ? WHERE sample_id = ? AND id IS NOT ? "
+                "AND COALESCE(edited_text, ocr_text) != ?",
+                (text, sample_id, except_id, text))
+            self._db.commit()
+            return cur.rowcount
+
     def favorite_count(self) -> int:
         with self._lock:
             return self._db.execute(

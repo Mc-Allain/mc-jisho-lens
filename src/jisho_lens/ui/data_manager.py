@@ -40,9 +40,15 @@ from jisho_lens.ui.pack_review import (
 
 THUMB = QSize(180, 50)
 (COL_TICK, COL_PICTURE, COL_OCR, COL_ANSWER, COL_STATUS, COL_SOURCE, COL_CATEGORY,
- COL_CREATED) = range(8)
+ COL_CREATED, COL_HISTORY) = range(9)
 ALL, OWN, NONE = None, "\x00own", "\x00none"
 STATUS = {"edited": "Fixed with Edit", "confirmed": "✓ Correct", None: "Not checked"}
+
+
+def _when(created: float) -> str:
+    import time
+
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(created))
 
 
 def _status(s: Sample) -> str:
@@ -169,12 +175,17 @@ class EditAnswersDialog(QDialog):
 class DataManagerWindow(QDialog):
     changed = Signal()  # samples were edited, labelled or deleted
 
-    def __init__(self, store: OcrDataStore, protected=lambda: set(), parent=None) -> None:
+    def __init__(self, store: OcrDataStore, usage=lambda: {}, parent=None,
+                 on_answer=lambda sid, text: 0) -> None:
         super().__init__(parent)
         self.setWindowTitle("Manage OCR data")
         self.resize(1180, 720)
         self.store = store
-        self._protected = protected  # () -> sample ids of favorites (not deletable)
+        # () -> {sample id: [(capture id, time, favorite)]}: History captures using each
+        # sample; a sample used by a favorite capture can't be deleted
+        self._usage_of = usage
+        self._usage: dict = {}
+        self._on_answer = on_answer  # (sample id, text): History captures show the new text
         self.samples: list[Sample] = []
         self._ticked: set[str] = set()  # sample ids ticked (kept across reloads)
 
@@ -207,9 +218,12 @@ class DataManagerWindow(QDialog):
         bar.addWidget(all_btn)
         bar.addWidget(none_btn)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(["", "Picture", "OCR read", "Right answer",
-                                              "Status", "Source pack", "Category", "Added"])
+                                              "Status", "Source pack", "Category", "Added",
+                                              "In History"])
+        self.table.horizontalHeader().moveSection(COL_HISTORY, COL_STATUS + 1)
+        self.table.setColumnWidth(COL_HISTORY, 120)
         self.table.setColumnWidth(COL_TICK, 32)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -273,6 +287,10 @@ class DataManagerWindow(QDialog):
     # ---------- data ----------
     def reload(self) -> None:
         self.samples = sorted(self.store.all(), key=lambda s: s.created, reverse=True)
+        try:
+            self._usage = self._usage_of() or {}
+        except Exception:  # noqa: BLE001
+            self._usage = {}
         label, _uses, _own = self.store.using()
         self.using.setText(f"<b>Using:</b> {html.escape(label)}")
         self.using.setToolTip(plain_tooltip(self.store.using_details()))
@@ -343,6 +361,19 @@ class DataManagerWindow(QDialog):
         self.table.setItem(i, COL_SOURCE, source)
         self.table.setItem(i, COL_CATEGORY, item(s.category or "—"))
         self.table.setItem(i, COL_CREATED, item(s.created.replace("T", " ")[:16]))
+        used = self._usage.get(s.id, [])
+        favs = [u for u in used if u[2]]
+        if favs:
+            text = "★ favorite" + (f" (+{len(used) - 1})" if len(used) > 1 else "")
+        else:
+            text = f"{len(used)} capture{'s' if len(used) != 1 else ''}" if used else "—"
+        tip = ("Used by these History captures (captures of the same sentence share one "
+               "sample, so its picture can be from an earlier capture):\n"
+               + "\n".join(f"{'★ ' if fav else ''}{_when(created)}"
+                           + (" (favorite: this sample can't be deleted)" if fav else "")
+                           for _cid, created, fav in used)
+               if used else "Not used by any capture in History")
+        self.table.setItem(i, COL_HISTORY, item(text, tip))
 
     def _load_thumbs(self) -> None:
         end = min(self._thumbs + 12, len(self.samples))
@@ -457,6 +488,10 @@ class DataManagerWindow(QDialog):
             if s.source_pack_id:
                 packs.add(s.source_pack)
             self.store.set_truth(sid, text, "edited")
+            try:
+                self._on_answer(sid, text)  # its History captures show the new answer
+            except Exception:  # noqa: BLE001
+                pass
         n = len(dlg.changes)
         note = f"{n} answer{'s' if n != 1 else ''} changed"
         if packs:
@@ -482,7 +517,8 @@ class DataManagerWindow(QDialog):
         sel = self._selected()
         if not sel:
             return
-        protected = self._protected()
+        self._usage = self._usage_of() or {}
+        protected = {sid for sid, used in self._usage.items() if any(u[2] for u in used)}
         keep = [s for s in sel if s.id in protected]
         go = [s for s in sel if s.id not in protected]
         from_packs = sorted({s.source_pack for s in go if s.source_pack_id})
@@ -490,8 +526,12 @@ class DataManagerWindow(QDialog):
         if from_packs:
             text += f"\n\nThese packs will show as (partial): {', '.join(from_packs)}."
         if keep:
-            text += (f"\n\n{len(keep)} sample{'s' if len(keep) != 1 else ''} of favorite "
-                     "captures will be kept (remove the star in History first).")
+            when = ", ".join(_when(u[1]) for s in keep for u in self._usage.get(s.id, [])
+                             if u[2])
+            text += (f"\n\n{len(keep)} sample{'s' if len(keep) != 1 else ''} will be kept: "
+                     f"used by a favorite capture in History ({when}). Captures of the same "
+                     "sentence share one sample, so its picture can be from an earlier "
+                     "capture. Remove the star in History first to delete it.")
         if not go:
             QMessageBox.information(self, "Delete", text)
             return

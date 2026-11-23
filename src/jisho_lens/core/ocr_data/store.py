@@ -159,31 +159,38 @@ class OcrDataStore:
                                                                encoding="utf-8")
             self._cache = None
 
-    def find_text(self, text: str) -> Sample | None:
+    def find_text(self, text: str, shown: str | None = None) -> Sample | None:
         """A sample of the same sentence: its OCR text or its right answer equals `text`.
 
-        Prefers a checked sample (edited or ✓) when there are several.
+        When there are several: the one whose right answer is `shown` (the text as the
+        capture shows it, after your corrections), else a checked one (edited or ✓), else
+        any.
         """
         key = _key(text)
         if not key:
             return None
-        found = None
+        want = _key(shown) if shown else ""
+        matches = []
         for s in self._cache if self._cache is not None else self.all():
             truths = () if s.truth is None else (s.truth, f"{s.speaker or ''}{s.truth}")
             if _key(s.ocr_text) == key or any(_key(x) == key for x in truths):
-                if s.checked:
-                    return self.get(s.id)
-                found = found or s
-        return self.get(found.id) if found else None
+                matches.append(s)
+        if not matches:
+            return None
+        best = (next((s for s in matches if want and s.truth and _key(s.truth) == want), None)
+                or next((s for s in matches if s.checked), None) or matches[0])
+        return self.get(best.id)
 
     def add_capture(self, image: Image.Image, ocr_text: str, *, engine: str, preset: str,
                     seconds: float, speaker: str | None,
-                    screen: dict | None = None, png: bytes | None = None) -> str:
+                    screen: dict | None = None, png: bytes | None = None,
+                    shown: str | None = None) -> str:
         """Keep a capture as a sample. Returns the sample id.
 
         The same image refreshes its sample's OCR result. Another crop of a sentence that is
         already kept (same OCR text, or OCR text equal to a kept right answer) is not saved
-        again: the existing sample's id is returned, so Edit and ✓ update that one.
+        again: the existing sample's id is returned, so Edit and ✓ update that one. With
+        several, the one whose answer is `shown` (the capture's text) is used.
         """
         png = png if png is not None else png_bytes(image)
         sid = sample_id(png)
@@ -193,7 +200,7 @@ class OcrDataStore:
             existing.seconds, existing.speaker = seconds, speaker
             self.save(existing)
             return sid
-        same = self.find_text(ocr_text)
+        same = self.find_text(ocr_text, shown)
         if same is not None:
             return same.id
         self.save(Sample(
