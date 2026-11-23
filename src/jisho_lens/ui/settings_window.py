@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -106,8 +105,6 @@ class SettingsWindow(QDialog):
         self.collect.setChecked(settings.data.collect == "yes")
         self.collect.setToolTip("Off unless you agree. The data stays on this computer; nothing "
                                 "is sent anywhere unless you export and share it yourself.")
-        self.game = QLineEdit(settings.data.game)
-        self.game.setPlaceholderText("Optional, e.g. Azur Promilia")
         self.delete_data_btn = QPushButton("Delete collected data…")
         self.delete_data_btn.clicked.connect(self._delete_collected)
         self._corrections = corrections
@@ -160,7 +157,6 @@ class SettingsWindow(QDialog):
         form.addRow("Keep in History", self.history_keep)
         form.addRow("OCR data", self.collect)
         form.addRow("", self._collect_note)
-        form.addRow("Game name", self.game)
         form.addRow("OCR data space", self.data_limit)
         data_buttons = QHBoxLayout()
         data_buttons.addWidget(self.corrections_btn)
@@ -268,6 +264,5 @@ class SettingsWindow(QDialog):
             self._settings.data.collect = "yes"
         elif self._settings.data.collect == "yes":
             self._settings.data.collect = "no"  # turned off; "ask" stays until answered
-        self._settings.data.game = self.game.text().strip()
         self.applied.emit(self._settings)
         self.accept()

@@ -66,7 +66,7 @@ def test_samples_dedupe_and_truth(tmp_path):
                             speaker="テララ")
     assert store.add_capture(img("x"), "そうだ!", engine="windows", preset="none",
                              seconds=0.1, speaker="テララ") == sid  # same image, same sample
-    assert store.stats()["samples"] == 1 and store.get(sid).category == "dialogue"
+    assert store.stats()["samples"] == 1 and store.get(sid).text_type == "dialogue"
     store.set_truth(sid, "そうだ！", "edited")
     s = store.get(sid)
     assert s.checked and s.truth_source == "edited" and s.engine == "windows"
@@ -79,7 +79,7 @@ def make_store(path, texts, truths, source="edited"):
     ids = []
     for t, truth in zip(texts, truths, strict=True):
         sid = store.add_capture(img(t), t, engine="rapid-v6", preset="none", seconds=1.0,
-                                speaker=None, game="Azur Promilia")
+                                speaker=None)
         if truth is not None:
             store.set_truth(sid, truth, source)
         ids.append(sid)
@@ -90,7 +90,6 @@ def test_export_only_edit_fixed(tmp_path):
     a, ids = make_store(tmp_path / "a", ["one", "two", "three"], ["一", None, "三"])
     a.set_truth(ids[2], "three", "confirmed")  # OCR was right: stays on this computer
     assert [s.id for s in select(a)] == [ids[0]]
-    assert len(select(a, game="azur promilia")) == 1 and select(a, game="other") == []
     pack = tmp_path / "a.zip"
     assert export_pack(a, pack, a.all()) == 1  # export leaves the others out anyway
     assert set(read_pack(pack).samples) == {ids[0]}
@@ -260,3 +259,20 @@ def test_rejects_non_pack(tmp_path):
     junk.write_bytes(b"not a zip")
     with pytest.raises(PackError):
         import_pack(OcrDataStore(tmp_path / "s"), junk)
+
+
+def test_old_data_with_a_game_name_still_loads(tmp_path):
+    store = OcrDataStore(tmp_path / "a")
+    sid = store.add_capture(img("x"), "そうた", engine="rapid-v6", preset="none", seconds=1,
+                            speaker=None)
+    path = store.samples_dir / f"{sid}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["game"] = "Azur Promilia"  # samples saved before the game name was removed
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    store._cache = None
+    assert store.get(sid).ocr_text == "そうた" and not hasattr(store.get(sid), "game")
+    settings_file = tmp_path / "settings.toml"
+    settings_file.write_text('[data]\ncollect = "yes"\ngame = "Azur Promilia"\n',
+                             encoding="utf-8")
+    s = Settings.load(settings_file)
+    assert s.data.collect == "yes" and not hasattr(s.data, "game")

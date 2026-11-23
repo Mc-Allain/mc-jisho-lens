@@ -510,7 +510,7 @@ class JishoLens:
             try:
                 self._sample_id = self.ocr_data.add_capture(
                     job.image, raw, engine=job.engine, preset=job.preset,
-                    seconds=round(outcome.seconds, 3), speaker=speaker, game=data.game,
+                    seconds=round(outcome.seconds, 3), speaker=speaker,
                     screen=_screen_info(), png=png)
                 if self._sample_id == sample_id(png):
                     same_file = self.ocr_data.png_path(self._sample_id)

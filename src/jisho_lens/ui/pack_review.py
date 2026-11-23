@@ -2,7 +2,7 @@
 
 One row per item in the pack(s): Include checkbox, picture (OCR packs), status, what OCR
 read, Before (your answer) / After (theirs) with the changed characters highlighted, and for
-"Different answer" rows what to do. Filters by status, game and contributor; Select all /
+"Different answer" rows what to do. Filters by status and contributor; Select all /
 none act on the rows shown. Built on core.ocr_data.packs.ReviewRow; translation packs
 (Phase 5) reuse it without the picture column.
 """
@@ -18,11 +18,13 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QStyle,
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from jisho_lens.core.categories import category_suggestions, category_summary, clean_category
 from jisho_lens.core.ocr_data.packs import (
     ALL_ANSWERS,
     DIFFERS,
@@ -43,12 +46,14 @@ from jisho_lens.core.ocr_data.packs import (
     STATUS_LABELS,
     USE_THEIRS,
     ReviewRow,
+    label_rows,
 )
 
 THUMB = QSize(200, 56)
 STATUS_COLORS = {NEW: "#5cbf6a", DIFFERS: "#e0a030", SAME_SENTENCE: "#6fb3e0", SAME: "#8a8f99"}
-COL_INCLUDE, COL_IMAGE, COL_STATUS, COL_OCR, COL_BEFORE, COL_AFTER, COL_CHOICE, COL_FROM = \
-    range(8)
+COL_INCLUDE, COL_IMAGE, COL_STATUS, COL_OCR, COL_BEFORE, COL_AFTER, COL_CHOICE, COL_FROM, \
+    COL_CATEGORY = range(9)
+NO_CATEGORY = "\x00none"  # filter value for rows without a category
 _HTML = Qt.ItemDataRole.UserRole + 10
 
 
@@ -122,22 +127,62 @@ class _ImageView(QDialog):
         self.resize(min(pixmap.width() + 40, 1400), min(pixmap.height() + 60, 900))
 
 
+class CategoryBox(QComboBox):
+    """Type a category, or pick one: the defaults (Azur Promilia JP) and those in use."""
+
+    def __init__(self, names=(), parent=None) -> None:
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.set_names(names)
+        completer = QCompleter(self.model(), self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.setCompleter(completer)
+        self.lineEdit().setPlaceholderText("Category (blank = none)")
+        self.setMinimumWidth(200)
+
+    def set_names(self, names) -> None:
+        text = self.currentText() if self.count() else ""
+        self.clear()
+        self.addItems(category_suggestions(*names))
+        self.setEditText(text)
+
+    def text(self) -> str:
+        return clean_category(self.currentText())
+
+
 class PackReviewDialog(QDialog):
-    """mode: "import" (Before = your data) or "merge" (rows where packs disagree)."""
+    """mode: "import" (Before = your data), "merge" (rows where packs disagree) or
+    "export" (your fixed samples: Before = what OCR read, After = your fix)."""
 
     def __init__(self, rows: list[ReviewRow], mode: str = "import", *, title: str = "",
                  skipped: int = 0, space: tuple[float, int] | None = None,
-                 show_images: bool = True, learn_option: bool = True, parent=None) -> None:
+                 show_images: bool = True, learn_option: bool = True, packs=None,
+                 preview=None, extra=None, on_change=None, parent=None) -> None:
         super().__init__(parent)
         self.rows, self.mode = rows, mode
         self._space = space  # (MB used now, limit MB) for the footer
-        self.setWindowTitle(title or ("Review import" if mode == "import" else "Review merge"))
-        self.resize(1180, 720)
+        self._preview = preview  # () -> ("Using:" now, after) — kept up to date
+        self._packs = packs or []
+        self.changed_hooks = [on_change] if on_change else []  # called on any change
+        # () -> "" or why the main button can't be pressed yet (e.g. no pack name)
+        self.requirements: list = []
+        self.setWindowTitle(title or {"import": "Review import", "merge": "Review merge",
+                                      "export": "Review export"}[mode])
+        self.resize(1180, 760)
 
-        intro = QLabel(
-            "Check what will be added. Nothing changes until you press "
-            + ("<b>Import</b>." if mode == "import" else "<b>Save merged pack</b>.")
-            + " Untick anything you don't trust, or screenshots that show names or chat.")
+        if mode == "export":
+            intro = QLabel("Check what will be exported (only samples you fixed with "
+                           "<b>Edit</b>). Untick anything you don't want to share, like "
+                           "screenshots that show names or chat, and label them with a "
+                           "category if you like. Nothing is saved until you press "
+                           "<b>Export…</b>.")
+        else:
+            intro = QLabel(
+                "Check what will be added. Nothing changes until you press "
+                + ("<b>Import</b>." if mode == "import" else "<b>Save merged pack</b>.")
+                + " Untick anything you don't trust, or screenshots that show names or chat.")
         intro.setWordWrap(True)
         self.status_filter = QComboBox()
         self.status_filter.addItem("All", None)
@@ -145,33 +190,62 @@ class PackReviewDialog(QDialog):
             n = sum(r.status == status for r in rows)
             if n:
                 self.status_filter.addItem(f"{STATUS_LABELS[status]} ({n})", status)
-        self.game_filter = QComboBox()
-        self.game_filter.addItem("All games", None)
-        for g in sorted({r.game for r in rows if r.game}):
-            self.game_filter.addItem(g, g)
         self.who_filter = QComboBox()
         self.who_filter.addItem("All contributors", None)
         for c in sorted({r.contributor for r in rows if r.contributor}):
             self.who_filter.addItem(c[:8], c)
-        for box in (self.status_filter, self.game_filter, self.who_filter):
+        self.category_filter = QComboBox()
+        for box in (self.status_filter, self.who_filter, self.category_filter):
             box.currentIndexChanged.connect(self._filter)
         all_btn = QPushButton("Select all")
         none_btn = QPushButton("Select none")
         all_btn.clicked.connect(lambda: self._select(True))
         none_btn.clicked.connect(lambda: self._select(False))
         bar = QHBoxLayout()
-        for w in (QLabel("Show"), self.status_filter, self.game_filter, self.who_filter):
+        for w in (QLabel("Show"), self.status_filter, self.who_filter, self.category_filter):
             bar.addWidget(w)
+        self.status_filter.setVisible(mode != "export")
+        self.who_filter.setVisible(mode != "export")
         bar.addStretch(1)
         bar.addWidget(all_btn)
         bar.addWidget(none_btn)
 
-        self.table = QTableWidget(len(rows), 8)
+        # categories: tick / untick a whole category; label ticked rows (export, merge)
+        self.quick_category = QComboBox()
+        tick_btn = QPushButton("Tick")
+        untick_btn = QPushButton("Untick")
+        tick_btn.setToolTip("Tick every row of this category")
+        untick_btn.setToolTip("Untick every row of this category")
+        tick_btn.clicked.connect(lambda: self._tick_category(True))
+        untick_btn.clicked.connect(lambda: self._tick_category(False))
+        self.label_box = CategoryBox(self._row_categories())
+        self.label_box.setToolTip("Pick a category, or type one and press Enter: the ticked "
+                                  "rows shown get it right away. Clear it to remove it.")
+        self._last_label: str | None = None  # last category applied from the box
+        self.label_box.activated.connect(lambda _=0: self._label_ticked())
+        self.label_box.lineEdit().editingFinished.connect(self._label_typed)
+        self.label_note = QLabel()
+        self.label_note.setStyleSheet("color: #8a8f99;")
+        cat_bar = QHBoxLayout()
+        cat_bar.addWidget(QLabel("Category"))
+        cat_bar.addWidget(self.quick_category)
+        cat_bar.addWidget(tick_btn)
+        cat_bar.addWidget(untick_btn)
+        cat_bar.addStretch(1)
+        if mode in ("export", "merge"):
+            cat_bar.addWidget(QLabel("Label ticked rows as"))
+            cat_bar.addWidget(self.label_box)
+            cat_bar.addWidget(self.label_note)
+        self.label_box.setVisible(mode in ("export", "merge"))
+
+        self.table = QTableWidget(len(rows), 9)
         self.table.setHorizontalHeaderLabels(
             ["Include", "Picture", "Status", "OCR read",
-             "Before (yours)" if mode == "import" else "Before (first pack)",
-             "After (theirs)" if mode == "import" else "After (other packs)",
-             "Choice", "From"])
+             {"import": "Before (yours)", "merge": "Before (first pack)",
+              "export": "OCR read"}[mode],
+             {"import": "After (theirs)", "merge": "After (other packs)",
+              "export": "Your fix"}[mode],
+             "Choice", "From", "Category"])
         self.table.setItemDelegate(_HtmlDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -183,8 +257,12 @@ class PackReviewDialog(QDialog):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(COL_IMAGE, THUMB.width() + 8)
         self.table.setColumnHidden(COL_IMAGE, not show_images)
-        self.table.setColumnHidden(COL_FROM, mode == "import" and len(
-            {r.pack.name for r in rows}) <= 1)
+        self.table.setColumnHidden(COL_FROM, mode == "export" or (mode == "import" and len(
+            {r.pack.name for r in rows}) <= 1))
+        for col in (COL_STATUS, COL_OCR, COL_CHOICE):
+            self.table.setColumnHidden(col, mode == "export" or self.table.isColumnHidden(col))
+        header.moveSection(header.visualIndex(COL_CATEGORY), header.visualIndex(COL_AFTER) + 1)
+        self.table.setColumnWidth(COL_CATEGORY, 150)
         self.table.cellDoubleClicked.connect(self._double_clicked)
         self._fill()
         self.table.itemChanged.connect(self._item_changed)
@@ -192,6 +270,7 @@ class PackReviewDialog(QDialog):
         self.learn = QCheckBox("Also learn OCR fixes from these (applied to your future captures; "
                                "see Settings → Learned corrections)")
         self.learn.setVisible(mode == "import" and learn_option)
+        self._refresh_categories()
         self.footer = QLabel()
         self.footer.setWordWrap(True)
         note = QLabel(f"{skipped} samples without an Edit fix were left out (only fixed "
@@ -199,24 +278,67 @@ class PackReviewDialog(QDialog):
         note.setStyleSheet("color: #8a8f99;")
         note.setVisible(bool(skipped))
         buttons = QDialogButtonBox()
-        self.ok_btn = buttons.addButton("Import" if mode == "import" else "Save merged pack…",
+        self.ok_btn = buttons.addButton({"import": "Import", "merge": "Save merged pack…",
+                                         "export": "Export…"}[mode],
                                         QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.blocked = QLabel()  # why the main button is disabled
+        self.blocked.setStyleSheet("color: #e0a030;")
+        self.blocked.setWordWrap(True)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.blocked, 1)
+        bottom.addWidget(buttons)
 
         layout = QVBoxLayout(self)
         layout.addWidget(intro)
+        for pack in self._packs:
+            layout.addLayout(self._pack_header(pack))
         layout.addLayout(bar)
+        layout.addLayout(cat_bar)
         layout.addWidget(self.table, 1)
         layout.addWidget(self.learn)
         layout.addWidget(note)
+        self.using = QLabel()
+        self.using.setWordWrap(True)
+        self.using.setStyleSheet("color: #a9cfff;")
+        self.using.setVisible(preview is not None)
+        layout.addWidget(self.using)
+        if extra is not None:
+            layout.addWidget(extra)
         layout.addWidget(self.footer)
-        layout.addWidget(buttons)
+        layout.addLayout(bottom)
         self._update_footer()
         self._thumbs_done = 0
         if show_images:
             QTimer.singleShot(0, self._load_thumbs)
+
+    def _pack_header(self, pack) -> QHBoxLayout:
+        """'RavenOCR v2 · by 58d34512 · 120 samples   [History…]'."""
+        info = pack.info
+        row = QHBoxLayout()
+        who = f" · by {info.contributor[:8]}" if info and info.contributor else ""
+        extra = "" if info and info.has_history else " · no history (older pack)"
+        label = QLabel(f"<b>{html.escape(pack.label)}</b>{who} · "
+                       f"{len(pack.samples)} samples · file {html.escape(pack.name)}{extra}")
+        row.addWidget(label, 1)
+        if info and info.log:
+            button = QPushButton("History…")
+            button.setToolTip(info.history_text())
+            button.clicked.connect(lambda _=False, i=info: self._show_history(i))
+            row.addWidget(button)
+        return row
+
+    def _show_history(self, info) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"History of {info.label}")
+        text = QPlainTextEdit(info.history_text())
+        text.setReadOnly(True)
+        box = QVBoxLayout(dlg)
+        box.addWidget(text)
+        dlg.resize(760, 300)
+        dlg.exec()
 
     # ---------- table ----------
     def _fill(self) -> None:
@@ -268,8 +390,9 @@ class PackReviewDialog(QDialog):
             self.table.setItem(i, COL_CHOICE, QTableWidgetItem())
             if row.status == DIFFERS:
                 self.table.setCellWidget(i, COL_CHOICE, self._choice_box(row))
-            source = QTableWidgetItem(f"{row.pack.name}\n{row.contributor[:8]}"
-                                      + (f"\n{row.game}" if row.game else ""))
+            self.table.setItem(i, COL_CATEGORY, QTableWidgetItem())
+            self._show_category(i)
+            source = QTableWidgetItem(f"{row.pack.name}\n{row.contributor[:8]}")
             source.setForeground(Qt.GlobalColor.gray)
             self.table.setItem(i, COL_FROM, source)
         self.table.resizeRowsToContents()
@@ -296,9 +419,12 @@ class PackReviewDialog(QDialog):
                         KEEP_ALTERNATIVE: "Yours stays; theirs is kept as an alternative and "
                                           "the sample is marked for review"}
                        .get(row.choice, "Which answer the merged pack uses"))
-        box.currentIndexChanged.connect(lambda _=0, r=row, b=box: setattr(r, "choice",
-                                                                         b.currentData()))
+        box.currentIndexChanged.connect(lambda _=0, r=row, b=box: self._choose(r, b))
         return box
+
+    def _choose(self, row: ReviewRow, box: QComboBox) -> None:
+        row.choice = box.currentData()
+        self._update_footer()  # e.g. Keep mine makes the pack "(partial)"
 
     def _load_thumbs(self) -> None:
         """Pictures are read from the pack a few at a time, so big packs open quickly."""
@@ -334,11 +460,76 @@ class PackReviewDialog(QDialog):
 
     # ---------- filters ----------
     def _visible(self, row: ReviewRow) -> bool:
-        status, game, who = (self.status_filter.currentData(), self.game_filter.currentData(),
-                             self.who_filter.currentData())
+        status, who = self.status_filter.currentData(), self.who_filter.currentData()
+        cat = self.category_filter.currentData()
         return ((status is None or row.status == status)
-                and (game is None or row.game == game)
-                and (who is None or row.contributor == who))
+                and (who is None or row.contributor == who)
+                and (cat is None or (row.category or NO_CATEGORY) == cat))
+
+    # ---------- categories ----------
+    def _row_categories(self) -> list[str]:
+        return sorted({r.category for r in self.rows if r.category}, key=str.lower)
+
+    def _show_category(self, i: int) -> None:
+        cat = self.rows[i].category
+        item = self.table.item(i, COL_CATEGORY)
+        item.setData(_HTML, html.escape(cat) if cat
+                     else "<span style='color:#8a8f99'>—</span>")
+
+    def _refresh_categories(self) -> None:
+        """Category filter / quick-select lists with counts, after labelling."""
+        counts: dict[str, int] = {}
+        for r in self.rows:
+            counts[r.category or NO_CATEGORY] = counts.get(r.category or NO_CATEGORY, 0) + 1
+        names = self._row_categories()
+        for box, first in ((self.category_filter, ("All categories", None)),
+                           (self.quick_category, None)):
+            current = box.currentData()
+            box.blockSignals(True)
+            box.clear()
+            if first:
+                box.addItem(*first)
+            for name in names:
+                box.addItem(f"{name} ({counts[name]})", name)
+            if counts.get(NO_CATEGORY):
+                box.addItem(f"No category ({counts[NO_CATEGORY]})", NO_CATEGORY)
+            index = box.findData(current)
+            box.setCurrentIndex(index if index >= 0 else 0)
+            box.blockSignals(False)
+        self.label_box.set_names(names)
+
+    def _tick_category(self, on: bool) -> None:
+        cat = self.quick_category.currentData()
+        if cat is None:
+            return
+        self.table.blockSignals(True)
+        for i, row in enumerate(self.rows):
+            if row.status != SAME and (row.category or NO_CATEGORY) == cat:
+                row.include = on
+                self.table.item(i, COL_INCLUDE).setCheckState(
+                    Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+        self.table.blockSignals(False)
+        self._update_footer()
+
+    def _label_typed(self) -> None:
+        """Enter or leaving the box: apply a typed category (only when it changed)."""
+        if self.label_box.text() != (self._last_label or ""):
+            self._label_ticked()
+
+    def _label_ticked(self) -> None:
+        category = self.label_box.text()
+        self._last_label = category
+        rows = [r for i, r in enumerate(self.rows)
+                if r.include and not self.table.isRowHidden(i)]
+        label_rows(self.rows, category, only=rows)
+        self.label_note.setText(f"{len(rows)} labelled “{category}”" if category
+                                else f"category removed from {len(rows)}")
+        self.label_note.setMinimumWidth(self.label_note.sizeHint().width())
+        for i, row in enumerate(self.rows):
+            if row in rows:
+                self._show_category(i)
+        self._refresh_categories()
+        self._filter()
 
     def _filter(self) -> None:
         for i, row in enumerate(self.rows):
@@ -361,8 +552,13 @@ class PackReviewDialog(QDialog):
         new = [r for r in chosen if r.status in (NEW, SAME_SENTENCE)]
         differs = sum(r.status == DIFFERS for r in chosen)
         mb = sum(r.size for r in new) / 1024 / 1024
-        text = (f"<b>{len(chosen)}</b> of {len(self.rows)} selected: {len(new)} new "
-                f"({mb:.1f} MB), {differs} with a different answer.")
+        if self.mode == "export":
+            mb = sum(r.size for r in chosen) / 1024 / 1024
+            text = f"<b>{len(chosen)}</b> of {len(self.rows)} will be exported ({mb:.1f} MB)."
+        else:
+            text = (f"<b>{len(chosen)}</b> of {len(self.rows)} selected: {len(new)} new "
+                    f"({mb:.1f} MB), {differs} with a different answer.")
+        text += " " + html.escape(category_summary(r.category for r in chosen))
         if self.mode == "import" and self._space is not None:
             used, limit = self._space
             if limit:
@@ -373,7 +569,29 @@ class PackReviewDialog(QDialog):
                              "unchecked samples will be removed (imported samples are fixed "
                              "ones and are kept).</span>")
         self.footer.setText(text)
-        self.ok_btn.setEnabled(bool(chosen))
+        for hook in getattr(self, "changed_hooks", []):
+            hook()
+        self.refresh_ok()
+
+    def refresh_ok(self) -> None:
+        """Enable the main button, or say why it can't be pressed yet."""
+        if not hasattr(self, "blocked"):
+            return
+        verb = {"import": "import", "merge": "merge", "export": "export"}[self.mode]
+        reasons = [] if any(r.include and r.status != SAME for r in self.rows) else [
+            f"Tick at least one row to {verb}."]
+        reasons += [r for r in (req() for req in self.requirements) if r]
+        self.ok_btn.setEnabled(not reasons)
+        text = " ".join(reasons)
+        self.blocked.setText(f"⚠ {text}" if text else "")
+        self.ok_btn.setToolTip(text)
+        if self._preview is not None:
+            now, after = self._preview()
+            if self.mode == "import":
+                self.using.setText(f"<b>Using now:</b> {html.escape(now)} &nbsp;→&nbsp; "
+                                   f"<b>after import:</b> {html.escape(after)}")
+            else:
+                self.using.setText(f"<b>Merged pack made from:</b> {html.escape(after)}")
 
     @property
     def learn_fixes(self) -> bool:

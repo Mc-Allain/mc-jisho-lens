@@ -53,7 +53,6 @@ class DataSettings:
     """OCR data collection: off until the user agrees (SPEC: opt-in, local only)."""
 
     collect: str = "ask"  # "ask" (not answered yet) | "yes" | "no"
-    game: str = ""  # optional game name stored with collected samples
     max_mb: int = 300  # space for samples (0 = no limit); corrected ones are always kept
 
     @property

@@ -37,8 +37,8 @@ class Sample:
     preset: str = ""
     seconds: float | None = None
     speaker: str | None = None
-    category: str = "text"  # "dialogue" when a speaker line was found; editable
-    game: str = ""
+    text_type: str = "text"  # "dialogue" when a speaker line was found (OCR benchmark)
+    category: str = ""  # your label, set when exporting or merging (e.g. Azur Promilia JP)
     screen: dict = field(default_factory=dict)  # width, height, scale
     app_version: str = __version__
     created: str = ""
@@ -59,6 +59,12 @@ class Sample:
     @classmethod
     def from_dict(cls, data: dict) -> Sample:
         known = {f for f in cls.__dataclass_fields__}
+        data = dict(data)
+        if "text_type" not in data and data.get("category") in ("text", "dialogue"):
+            # saved before categories: "category" was the text type
+            data["text_type"], data["category"] = data["category"], ""
+        if not isinstance(data.get("category", ""), str):
+            data["category"] = ""
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
@@ -78,6 +84,9 @@ class OcrDataStore:
         self.samples_dir = self.folder / "samples"
         self._lock = threading.Lock()
         self._cache: list[Sample] | None = None  # all samples, dropped on every change
+        from jisho_lens.core.ocr_data.provenance import Provenance
+
+        self.provenance = Provenance(self.folder)  # pack names, imports, "Using:" label
 
     # ---------- identity ----------
     def contributor(self) -> str:
@@ -152,7 +161,7 @@ class OcrDataStore:
         return self.get(found.id) if found else None
 
     def add_capture(self, image: Image.Image, ocr_text: str, *, engine: str, preset: str,
-                    seconds: float, speaker: str | None, game: str = "",
+                    seconds: float, speaker: str | None,
                     screen: dict | None = None, png: bytes | None = None) -> str:
         """Keep a capture as a sample. Returns the sample id.
 
@@ -173,10 +182,35 @@ class OcrDataStore:
             return same.id
         self.save(Sample(
             id=sid, ocr_text=ocr_text, engine=engine, preset=preset, seconds=seconds,
-            speaker=speaker, category="dialogue" if speaker else "text", game=game,
+            speaker=speaker, text_type="dialogue" if speaker else "text",
             screen=screen or {}, created=time.strftime("%Y-%m-%dT%H:%M:%S"),
             contributor=self.contributor()), png)
         return sid
+
+    # ---------- where the data came from ----------
+    def using(self):
+        """(label, packs in use, own data?) e.g. "KaiOCR v4 (partial) + own data"."""
+        from jisho_lens.core.ocr_data.provenance import using_label
+
+        samples = self.all()
+        me = self.contributor() if self.samples_dir.exists() else ""
+        uses = self.provenance.uses({s.id for s in samples})
+        own = any(s.contributor == me for s in samples)
+        return using_label(uses, own), uses, own
+
+    def using_details(self) -> str:
+        """Hover text for the label: each pack's use and the history of the packs."""
+        label, uses, own = self.using()
+        lines = [f"Using: {label}"]
+        lines += [u.detail() for u in uses]
+        if own:
+            me = self.contributor()
+            n = sum(s.contributor == me for s in self.all())
+            lines.append(f"own data: {n} samples you collected (ID {me[:8]})")
+        log = self.provenance.used_logs({s.id for s in self.all()})
+        if log:
+            lines += ["", "History of these packs:"] + [e.line() for e in log]
+        return "\n".join(lines)
 
     # ---------- space ----------
     def size_bytes(self) -> int:
@@ -248,10 +282,14 @@ class OcrDataStore:
         self.save(sample)
 
     def set_category(self, sid: str, category: str) -> None:
+        """Your label for a sample (blank = none), set when exporting."""
         sample = self.get(sid)
-        if sample is not None:
+        if sample is not None and sample.category != category:
             sample.category = category
             self.save(sample)
+
+    def categories(self) -> list[str]:
+        return sorted({s.category for s in self.all() if s.category}, key=str.lower)
 
     def delete_all(self, keep: set[str] = frozenset()) -> int:
         """Delete every sample except the ids in `keep` (favorites). Returns deletions."""
@@ -261,6 +299,7 @@ class OcrDataStore:
                 if self.samples_dir.exists():
                     shutil.rmtree(self.samples_dir)
                 self._cache = None
+            self.provenance.clear_imports()
             return n
         n = 0
         for s in self.all():
