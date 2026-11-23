@@ -195,6 +195,7 @@ def test_use_theirs_is_not_partial(tmp_path):
     rows = review_import(me, read_pack(pack))
     assert preview_import_label(me, rows)[1] == "KaiOCR v1 (partial) + own data"  # Keep mine
     next(r for r in rows if r.status == DIFFERS).choice = USE_THEIRS
-    assert preview_import_label(me, rows) == ("own data", "KaiOCR v1 + own data")
+    # your only sample takes their answer: no own data left
+    assert preview_import_label(me, rows) == ("own data", "KaiOCR v1")
     apply_import(me, rows)
-    assert me.using()[0] == "KaiOCR v1 + own data"
+    assert me.using()[0] == "KaiOCR v1"

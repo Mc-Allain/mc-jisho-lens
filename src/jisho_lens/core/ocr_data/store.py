@@ -40,6 +40,10 @@ class Sample:
     speaker: str | None = None
     text_type: str = "text"  # "dialogue" when a speaker line was found (OCR benchmark)
     category: str = ""  # your label, set when exporting or merging (e.g. Azur Promilia JP)
+    source_pack: str = ""  # pack it was imported from ("KaiOCR v4"); "" = your own data
+    # that pack's ID; "" = your own (also after you change the answer); None = not known
+    # yet (saved before samples had a source; filled in once from the import records)
+    source_pack_id: str | None = None
     screen: dict = field(default_factory=dict)  # width, height, scale
     app_version: str = __version__
     created: str = ""
@@ -53,6 +57,10 @@ class Sample:
     @property
     def checked(self) -> bool:
         return self.truth is not None
+
+    @property
+    def source_label(self) -> str:
+        return self.source_pack if self.source_pack_id else "own data"
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=1)
@@ -190,7 +198,7 @@ class OcrDataStore:
             return same.id
         self.save(Sample(
             id=sid, ocr_text=ocr_text, engine=engine, preset=preset, seconds=seconds,
-            speaker=speaker, text_type="dialogue" if speaker else "text",
+            speaker=speaker, text_type="dialogue" if speaker else "text", source_pack_id="",
             screen=screen or {}, created=time.strftime("%Y-%m-%dT%H:%M:%S"),
             contributor=self.contributor()), png)
         return sid
@@ -200,10 +208,10 @@ class OcrDataStore:
         """(label, packs in use, own data?) e.g. "KaiOCR v4 (partial) + own data"."""
         from jisho_lens.core.ocr_data.provenance import using_label
 
+        self.backfill_sources()
         samples = self.all()
-        me = self.contributor() if self.samples_dir.exists() else ""
-        uses = self.provenance.uses({s.id for s in samples})
-        own = any(s.contributor == me for s in samples)
+        uses = self.provenance.uses({s.id: s for s in samples})
+        own = any(not s.source_pack_id for s in samples)
         return using_label(uses, own), uses, own
 
     def using_details(self) -> str:
@@ -213,13 +221,39 @@ class OcrDataStore:
         lines += [u.detail() for u in uses]
         if own:
             me = self.contributor()
-            n = sum(s.contributor == me for s in self.all())
-            lines.append(f"own data: {n} sample{'s' if n != 1 else ''} you collected "
-                         f"(ID {me[:8]})")
-        log = self.provenance.used_logs({s.id for s in self.all()})
+            n = sum(not s.source_pack_id for s in self.all())
+            lines.append(f"own data: {n} sample{'s' if n != 1 else ''} you collected or "
+                         f"changed (ID {me[:8]})")
+        log = self.provenance.used_logs({s.id: s for s in self.all()})
         if log:
             lines += ["", "History of these packs:"] + [e.line() for e in log]
         return "\n".join(lines)
+
+    def backfill_sources(self) -> int:
+        """Once: give samples imported before samples had a source pack their source, from
+        the import records. Returns how many were filled in."""
+        marker = self.folder / "sources-1.done"
+        if marker.exists() or not self.samples_dir.exists():
+            return 0
+        me = self.contributor()
+        by_id = {s.id: s for s in self.all()}
+        n = 0
+        for rec in self.provenance.records():
+            mine = []
+            for sid in rec.used:
+                s = by_id.get(sid)
+                if s is None or s.source_pack_id is not None:
+                    continue  # gone, or its source is known
+                if s.contributor == me:  # yours already ("Same" in that import)
+                    mine.append(sid)
+                    continue
+                s.source_pack, s.source_pack_id = rec.label, rec.pack_id
+                self.save(s)
+                n += 1
+            if mine:
+                self.provenance.mark_same(rec.pack_id, mine)
+        marker.write_text("ok", encoding="utf-8")
+        return n
 
     # ---------- space ----------
     def size_bytes(self) -> int:
@@ -283,10 +317,15 @@ class OcrDataStore:
         return removed
 
     def set_truth(self, sid: str, text: str, source: str) -> None:
-        """source: "edited" (user corrected the text) or "confirmed" (✓, OCR was right)."""
+        """source: "edited" (user corrected the text) or "confirmed" (✓, OCR was right).
+
+        Changing the answer of a sample imported from a pack makes it your own data (the
+        pack then shows as partial)."""
         sample = self.get(sid)
         if sample is None:
             return
+        if sample.source_pack_id and text != sample.truth:
+            sample.source_pack = sample.source_pack_id = ""
         sample.truth, sample.truth_source = text, source
         self.save(sample)
 

@@ -234,6 +234,7 @@ class JishoLens:
         menu.addAction("Capture text", self.start_capture)
         menu.addAction("Show window", self.show_window)
         menu.addAction("History…", self.open_history)
+        menu.addAction("Manage OCR data…", self.open_data_manager)
         menu.addSeparator()
         menu.addAction("Settings…", self.open_settings)
         menu.addAction("About…", self.open_about)
@@ -587,6 +588,7 @@ class JishoLens:
                 self._applied = []
             self.window.status_label.setText("Saved as correct ✓")
             self._update_confirm()
+            self._update_data_label()
 
     def open_history(self) -> None:
         from jisho_lens.ui.history_window import HistoryWindow
@@ -595,6 +597,7 @@ class JishoLens:
             self._history_window = HistoryWindow(self.history, self.ocr_data, self.settings,
                                                  self.corrections)
             self._history_window.changed.connect(self._on_history_changed)
+            self._history_window.manage_requested.connect(self.open_data_manager)
             self._history_window.setWindowIcon(app_icon())
             self._history_window.open_requested.connect(self.open_capture)
             self._own(self._history_window)
@@ -602,6 +605,29 @@ class JishoLens:
         self._history_window.show()
         self._history_window.raise_()
         self._history_window.activateWindow()
+
+    def open_data_manager(self) -> None:
+        from jisho_lens.ui.data_manager import DataManagerWindow
+
+        if getattr(self, "_data_manager", None) is not None:
+            self._data_manager.reload()
+            self._data_manager.show()
+            self._data_manager.raise_()
+            return
+        parent = self._history_window if self._history_window is not None else None
+        dlg = DataManagerWindow(self.ocr_data, self.history.favorite_sample_ids, parent)
+        dlg.setWindowIcon(app_icon())
+        dlg.changed.connect(self._on_data_managed)
+        dlg.finished.connect(lambda _=0: setattr(self, "_data_manager", None))
+        if parent is None:
+            self._own(dlg)
+        self._data_manager = dlg
+        dlg.show()
+
+    def _on_data_managed(self) -> None:
+        if self._history_window is not None:
+            self._history_window.refresh()
+        self._on_history_changed()
 
     def _on_history_changed(self) -> None:
         """Captures or collected data were deleted in the History window."""
@@ -677,6 +703,9 @@ class JishoLens:
             self._applied = []
             self.window.status_label.setText(status)
         self._update_confirm()
+        self._update_data_label()  # editing a pack's sample makes that pack partial
+        if self._history_window is not None:
+            self._history_window.refresh()
 
     def _tidy_ocr_data(self) -> None:
         """Once: merge duplicate samples kept before duplicates were detected, and share

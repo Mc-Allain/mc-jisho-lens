@@ -105,9 +105,8 @@ def export_pack(store: OcrDataStore, path: Path, samples: list[Sample],
     if name and release is None:
         label, _uses, _own = store.using()
         release = release_entry(store, name, "exported", label, samples)
-        ids = {s.id for s in store.all()}
         log = merge_logs([release], store.provenance.series_log(release.name),
-                         store.provenance.used_logs(ids))
+                         store.provenance.used_logs({s.id: s for s in store.all()}))
     manifest = {
         "format": PACK_FORMAT,
         "version": FORMAT,
@@ -197,6 +196,7 @@ def _valid_sample(s: Sample) -> bool:
     return (_str(s.ocr_text) and _str(s.truth, True) and _str(s.truth_source, True)
             and _str(s.speaker, True) and _str(s.contributor) and _str(s.category)
             and _str(s.engine) and _str(s.preset) and _str(s.text_type)
+            and _str(s.source_pack) and _str(s.source_pack_id, True)
             and isinstance(s.screen, dict) and isinstance(s.needs_review, bool)
             and isinstance(s.alternatives, list)
             and all(isinstance(a, dict) and _str(a.get("truth"), True)
@@ -512,6 +512,16 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
     for pack in {id(r.pack): r.pack for r in rows if r.include}.values():
         if isinstance(pack, Pack):
             pack.check_unchanged()  # before anything is written
+    me = store.contributor()
+
+    def take_source(sample: Sample, pack) -> None:
+        """The pack becomes the sample's source (not for your own packs)."""
+        info = getattr(pack, "info", None)
+        if info is not None and info.contributor != me:
+            sample.source_pack, sample.source_pack_id = pack.label, info.pack_id
+        else:
+            sample.source_pack = sample.source_pack_id = ""
+
     result = ImportResult()
     for row in rows:
         if not row.include or row.status == SAME:
@@ -524,6 +534,7 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
             sample.truth, sample.truth_source = theirs.truth, "edited"
             sample.alternatives = [a.as_alternative() for a in row.answers[1:]]
             sample.needs_review = len(row.answers) > 1
+            take_source(sample, row.pack)
             store.save(sample, row.pack.image(row.sid))
             result.added += 1
             result.fixed.append((row.ocr_text, theirs.truth))
@@ -531,6 +542,7 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
             local.category = local.category or row.category
             local.truth, local.truth_source = theirs.truth, "edited"
             local.alternatives += [a.as_alternative() for a in row.answers[1:]]
+            take_source(local, row.pack)
             store.save(local)
             result.answers_added += 1
             result.fixed.append((row.ocr_text, theirs.truth))
@@ -539,6 +551,7 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
                                        "contributor": local.contributor})
             local.alternatives += [a.as_alternative() for a in row.answers[1:]]
             local.truth, local.truth_source = theirs.truth, "edited"
+            take_source(local, row.pack)
             store.save(local)
             result.replaced += 1
             result.fixed.append((row.ocr_text, theirs.truth))
@@ -553,13 +566,16 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
     result.unanswered = sum(p.skipped for p in packs)
     for pack in packs:
         mine = [r for r in rows if r.pack is pack]
+        # used: the pack's answer is now the answer; same: present without that (identical
+        # already, or kept as an alternative to yours)
         used = [r.sid for r in mine if r.include and r.status != SAME
-                and not (r.status == DIFFERS and r.choice == KEEP_MINE)]
-        same = [r.sid for r in mine if r.status == SAME]
+                and not (r.status == DIFFERS and r.choice in (KEEP_MINE, KEEP_ALTERNATIVE))]
+        same = [r.sid for r in mine if r.status == SAME
+                or (r.include and r.status == DIFFERS and r.choice == KEEP_ALTERNATIVE)]
         declined = [r.sid for r in mine if _declined(r)]
         mine_pack = pack.info is not None and pack.info.contributor == store.contributor()
         if (used or same or declined) and pack.info is not None and not mine_pack:
-            store.provenance.record_import(pack.info, used + same, declined)
+            store.provenance.record_import(pack.info, used, declined, same)
     if corrections is not None:
         for ocr_text, truth in result.fixed:
             result.learned += corrections.learn(ocr_text.splitlines(), truth.splitlines())
@@ -668,17 +684,24 @@ def preview_import_label(store: OcrDataStore, rows: list[ReviewRow]) -> tuple[st
     """("Using:" label now, label after importing the rows as currently chosen)."""
     from jisho_lens.core.ocr_data.provenance import ImportRecord, PackUse, using_label
 
-    now, uses, own = store.using()
+    now, uses, _own = store.using()
+    me = store.contributor()
     after = [u for u in uses if all(u.record.pack_id != r.pack.info.pack_id
                                     for r in rows if r.pack.info)]
+    taken: set[str] = set()  # your samples that will get the pack's answer
     for pack in {id(r.pack): r.pack for r in rows}.values():
         mine = [r for r in rows if r.pack is pack]
-        used = [r for r in mine if (r.include and r.status != SAME
-                                    and not (r.status == DIFFERS and r.choice == KEEP_MINE))
-                or r.status == SAME]
+        if pack.info is None or pack.info.contributor == me:
+            continue  # your own pack: not listed
+        used = [r for r in mine if r.include and r.status != SAME
+                and not (r.status == DIFFERS and r.choice in (KEEP_MINE, KEEP_ALTERNATIVE))]
+        same = [r for r in mine if r.status == SAME
+                or (r.include and r.status == DIFFERS and r.choice == KEEP_ALTERNATIVE)]
         declined = [r for r in mine if _declined(r)]
-        if used:
+        taken |= {r.sid for r in used if r.status != DIFFERS or r.choice == USE_THEIRS}
+        if used or same:
             rec = ImportRecord(pack.info.pack_id, pack.label, pack.info.contributor,
                                pack.name, "")
-            after.append(PackUse(rec, len(used), len(used), len(declined)))
+            after.append(PackUse(rec, len(used) + len(same), len(used), len(declined)))
+    own = any(not s.source_pack_id and s.id not in taken for s in store.all())
     return now, using_label(after, own)

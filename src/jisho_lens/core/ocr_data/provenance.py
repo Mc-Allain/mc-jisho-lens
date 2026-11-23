@@ -140,8 +140,9 @@ class ImportRecord:
     contributor: str
     file: str
     imported: str
-    used: list[str] = field(default_factory=list)  # sample ids used from this pack
+    used: list[str] = field(default_factory=list)  # samples whose data came from this pack
     declined: list[str] = field(default_factory=list)  # unticked, or Keep mine
+    same: list[str] = field(default_factory=list)  # yours already identical to the pack's
     log: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -157,6 +158,7 @@ class ImportRecord:
                    contributor=str(d.get("contributor", ""))[:32],
                    file=str(d.get("file", ""))[:260], imported=str(d.get("imported", "")),
                    used=ids(d.get("used")), declined=ids(d.get("declined")),
+                   same=ids(d.get("same")),
                    log=[x for x in d.get("log", []) if isinstance(x, dict)]
                    if isinstance(d.get("log"), list) else [])
 
@@ -166,13 +168,15 @@ class PackUse:
     """How much of an imported pack is in your data now."""
 
     record: ImportRecord
-    present: int  # used samples still in your data
+    present: int  # samples of this pack in your data now (unchanged, or identical)
     used: int
     declined: int
+    changed: int = 0  # answers you changed since (now your own data)
+    deleted: int = 0  # deleted since
 
     @property
     def partial(self) -> bool:
-        return self.declined > 0 or self.present < self.used
+        return self.declined > 0 or self.changed > 0 or self.deleted > 0
 
     @property
     def label(self) -> str:
@@ -185,8 +189,10 @@ class PackUse:
         reasons = []
         if self.declined:
             reasons.append(f"{self.declined} not used by your choice")
-        if self.present < self.used:
-            reasons.append(f"{self.used - self.present} deleted since")
+        if self.changed:
+            reasons.append(f"{self.changed} changed by you")
+        if self.deleted:
+            reasons.append(f"{self.deleted} deleted since")
         return text + (f" ({', '.join(reasons)})" if reasons else "")
 
 
@@ -258,7 +264,17 @@ class Provenance:
                 out.append(rec)
         return out
 
-    def record_import(self, info: PackInfo, used: list[str], declined: list[str]) -> None:
+    def mark_same(self, pack_id: str, sids: list[str]) -> None:
+        """Move samples of a record from used to same (they were yours already)."""
+        records = self.records()
+        for rec in records:
+            if rec.pack_id == pack_id:
+                rec.used = [s for s in rec.used if s not in sids]
+                rec.same = sorted(set(rec.same) | set(sids))
+        self._write("imports.json", {"imports": [asdict(r) for r in records]})
+
+    def record_import(self, info: PackInfo, used: list[str], declined: list[str],
+                      same: list[str] = ()) -> None:
         records = self.records()
         rec = next((r for r in records if r.pack_id == info.pack_id), None)
         if rec is None:
@@ -266,7 +282,9 @@ class Provenance:
                                time.strftime("%Y-%m-%dT%H:%M:%S"))
             records.append(rec)
         rec.used = sorted(set(rec.used) | set(used))
-        rec.declined = sorted((set(rec.declined) | set(declined)) - set(rec.used))
+        rec.same = sorted((set(rec.same) | set(same)) - set(rec.used))
+        rec.declined = sorted((set(rec.declined) | set(declined)) - set(rec.used)
+                              - set(rec.same))
         rec.log = [asdict(e) for e in info.log]
         rec.imported = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._write("imports.json", {"imports": [asdict(r) for r in records]})
@@ -276,16 +294,28 @@ class Provenance:
             (self.folder / "imports.json").unlink(missing_ok=True)
 
     # ---------- the "Using:" label ----------
-    def uses(self, sample_ids: set[str]) -> list[PackUse]:
+    def uses(self, samples: dict) -> list[PackUse]:
+        """`samples`: {id: Sample} of your data now. A pack is listed while any of its
+        samples is in your data unchanged."""
         out = []
         for rec in sorted(self.records(), key=lambda r: r.imported):
-            present = sum(sid in sample_ids for sid in rec.used)
+            kept = changed = deleted = 0
+            for sid in rec.used:
+                s = samples.get(sid)
+                if s is None:
+                    deleted += 1
+                elif getattr(s, "source_pack_id", "") == rec.pack_id:
+                    kept += 1
+                else:
+                    changed += 1
+            present = kept + sum(sid in samples for sid in rec.same)
             if present:
-                out.append(PackUse(rec, present, len(rec.used), len(rec.declined)))
+                out.append(PackUse(rec, present, len(rec.used), len(rec.declined),
+                                   changed, deleted))
         return out
 
-    def used_logs(self, sample_ids: set[str]) -> list[LogEntry]:
-        return merge_logs(*(parse_log(u.record.log) for u in self.uses(sample_ids)))
+    def used_logs(self, samples: dict) -> list[LogEntry]:
+        return merge_logs(*(parse_log(u.record.log) for u in self.uses(samples)))
 
 
 def using_label(uses: list[PackUse], own: bool, max_packs: int = 2) -> str:

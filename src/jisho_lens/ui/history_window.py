@@ -117,7 +117,7 @@ class ExportNamePanel(QWidget):
         cats = category_summary(chosen)
         new = (f"{name} v{version} · today · by {self.store.contributor()[:8]} · exported: "
                f"{label} · {len(chosen)} samples" + (f" · {cats}" if cats else ""))
-        ids = {s.id for s in self.store.all()}
+        ids = {s.id: s for s in self.store.all()}
         old = [e.line() for e in merge_logs(prov.series_log(name), prov.used_logs(ids))]
         self.history.setPlainText("\n".join([new + "  (this export)"] + old))
 
@@ -176,6 +176,7 @@ FILTERS = [("All", "all"), ("★ Favorites", "favorites"), ("Corrected", "correc
 class HistoryWindow(QWidget):
     open_requested = Signal(int)  # capture id
     changed = Signal()  # captures or collected data were deleted
+    manage_requested = Signal()  # open Manage OCR data
 
     def __init__(self, history: HistoryStore, data: OcrDataStore, settings: Settings,
                  corrections: CorrectionStore | None = None) -> None:
@@ -240,8 +241,12 @@ class HistoryWindow(QWidget):
         import_btn.clicked.connect(self._import)
         merge_btn.clicked.connect(self._merge)
         testset_btn.clicked.connect(self._test_set)
+        manage_btn = QPushButton("Manage OCR data…")
+        manage_btn.setToolTip("Every sample with its source pack, category and status: "
+                              "filter, edit, label or delete")
+        manage_btn.clicked.connect(self.manage_requested)
         data_buttons = QHBoxLayout()
-        for b in (export_btn, import_btn, merge_btn, testset_btn):
+        for b in (manage_btn, export_btn, import_btn, merge_btn, testset_btn):
             data_buttons.addWidget(b)
         data_layout = QVBoxLayout(self.data_box)
         data_layout.addWidget(self.data_using)
@@ -268,6 +273,8 @@ class HistoryWindow(QWidget):
             sample = self.data.get(c.sample_id) if c.sample_id else None
             if sample is not None:
                 marks.append("✓ checked" if sample.checked else "collected")
+                if sample.source_pack_id:
+                    marks.append(f"from {sample.source_pack}")
             head = f"{when}  ·  {c.engine or ''}" + (f"  ·  {', '.join(marks)}" if marks else "")
             preview = " / ".join(c.lines)[:80]
             if c.speaker:

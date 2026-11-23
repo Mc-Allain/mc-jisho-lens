@@ -52,7 +52,7 @@ from jisho_lens.core.ocr_data.packs import (
 THUMB = QSize(200, 56)
 STATUS_COLORS = {NEW: "#5cbf6a", DIFFERS: "#e0a030", SAME_SENTENCE: "#6fb3e0", SAME: "#8a8f99"}
 COL_INCLUDE, COL_IMAGE, COL_STATUS, COL_OCR, COL_BEFORE, COL_AFTER, COL_CHOICE, COL_FROM, \
-    COL_CATEGORY = range(9)
+    COL_CATEGORY, COL_SOURCE = range(10)
 NO_CATEGORY = "\x00none"  # filter value for rows without a category
 _HTML = Qt.ItemDataRole.UserRole + 10
 
@@ -231,6 +231,10 @@ class PackReviewDialog(QDialog):
         self.label_box.lineEdit().editingFinished.connect(self._label_typed)
         self.label_note = QLabel()
         self.label_note.setStyleSheet("color: #8a8f99;")
+        self.remove_category_btn = QPushButton("Remove category")
+        self.remove_category_btn.setToolTip("Take the category off the ticked rows shown "
+                                            "(they get no category)")
+        self.remove_category_btn.clicked.connect(lambda _checked=False: self._unlabel_ticked())
         cat_bar = QHBoxLayout()
         cat_bar.addWidget(QLabel("Category"))
         cat_bar.addWidget(self.quick_category)
@@ -240,17 +244,19 @@ class PackReviewDialog(QDialog):
         if mode in ("export", "merge"):
             cat_bar.addWidget(QLabel("Label ticked rows as"))
             cat_bar.addWidget(self.label_box)
+            cat_bar.addWidget(self.remove_category_btn)
             cat_bar.addWidget(self.label_note)
         self.label_box.setVisible(mode in ("export", "merge"))
+        self.remove_category_btn.setVisible(mode in ("export", "merge"))
 
-        self.table = QTableWidget(len(rows), 9)
+        self.table = QTableWidget(len(rows), 10)
         self.table.setHorizontalHeaderLabels(
             ["Include", "Picture", "Status", "OCR read",
              {"import": "Before (yours)", "merge": "Before (first pack)",
               "export": "OCR read"}[mode],
              {"import": "After (theirs)", "merge": "After (other packs)",
               "export": "Your fix"}[mode],
-             "Choice", "From", "Category"])
+             "Choice", "From", "Category", "Source pack"])
         self.table.setItemDelegate(_HtmlDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -267,7 +273,9 @@ class PackReviewDialog(QDialog):
         for col in (COL_STATUS, COL_OCR, COL_CHOICE):
             self.table.setColumnHidden(col, mode == "export" or self.table.isColumnHidden(col))
         header.moveSection(header.visualIndex(COL_CATEGORY), header.visualIndex(COL_AFTER) + 1)
+        header.moveSection(header.visualIndex(COL_SOURCE), header.visualIndex(COL_CATEGORY) + 1)
         self.table.setColumnWidth(COL_CATEGORY, 150)
+        self.table.setColumnWidth(COL_SOURCE, 150)
         self.table.cellDoubleClicked.connect(self._double_clicked)
         self._fill()
         self.table.itemChanged.connect(self._item_changed)
@@ -398,6 +406,8 @@ class PackReviewDialog(QDialog):
                 self.table.setCellWidget(i, COL_CHOICE, self._choice_box(row))
             self.table.setItem(i, COL_CATEGORY, QTableWidgetItem())
             self._show_category(i)
+            source = QTableWidgetItem(self._source_of(row))
+            self.table.setItem(i, COL_SOURCE, source)
             source = QTableWidgetItem(f"{row.pack.name}\n{row.contributor[:8]}")
             source.setForeground(Qt.GlobalColor.gray)
             self.table.setItem(i, COL_FROM, source)
@@ -472,6 +482,14 @@ class PackReviewDialog(QDialog):
                 and (who is None or row.contributor == who)
                 and (cat is None or (row.category or NO_CATEGORY) == cat))
 
+    def _source_of(self, row: ReviewRow) -> str:
+        """Export: where your sample came from; import / merge: the pack(s) it comes from."""
+        if self.mode == "export":
+            return row.sample.source_label
+        packs = [row.pack.label] + [a.source.label for a in row.answers
+                                    if a.source is not None]
+        return " / ".join(dict.fromkeys(packs))
+
     # ---------- categories ----------
     def _row_categories(self) -> list[str]:
         return sorted({r.category for r in self.rows if r.category}, key=str.lower)
@@ -522,14 +540,20 @@ class PackReviewDialog(QDialog):
         if self.label_box.text() != (self._last_label or ""):
             self._label_ticked()
 
-    def _label_ticked(self) -> None:
-        category = self.label_box.text()
+    def _unlabel_ticked(self) -> None:
+        """Remove category: the ticked rows shown get no category."""
+        self.label_box.setEditText("")
+        self._label_ticked("")
+
+    def _label_ticked(self, category: str | None = None) -> None:
+        category = self.label_box.text() if category is None else category
         self._last_label = category
         rows = [r for i, r in enumerate(self.rows)
                 if r.include and not self.table.isRowHidden(i)]
         label_rows(self.rows, category, only=rows)
         self.label_note.setText(f"{len(rows)} labelled “{category}”" if category
-                                else f"category removed from {len(rows)}")
+                                else f"category removed from {len(rows)}"
+                                if rows else "no ticked rows shown")
         self.label_note.setMinimumWidth(self.label_note.sizeHint().width())
         for i, row in enumerate(self.rows):
             if row in rows:
