@@ -42,12 +42,12 @@ from jisho_lens.core.ocr_data import (
     review_import,
     review_merge,
     to_test_set,
-    unique_packs,
 )
 from jisho_lens.core.ocr_data.corrections import CorrectionStore
 from jisho_lens.core.ocr_data.packs import (
     merge_release_preview,
     merge_sources,
+    order_packs,
     preview_import_label,
     release_preview,
 )
@@ -491,40 +491,55 @@ class HistoryWindow(QWidget):
         self.changed.emit()
 
     def _merge(self) -> None:
-        paths = open_files(self, "Choose packs to merge (two or more)", str(downloads_dir()),
-                           "OCR data pack (*.zip)")
-        if len(paths) < 2:
-            if paths:
-                QMessageBox.information(self, "Merge", "Choose two or more packs.")
+        """Choose packs (several at once), then the Merge packs list: Add more from other
+        folders, Remove, Merge (the review), Cancel. Cancelling a later step comes back to
+        the list."""
+        from jisho_lens.ui.merge_list import PACK_FILTER, MergeListDialog
+
+        paths = open_files(self, "Choose packs to merge", str(downloads_dir()), PACK_FILTER)
+        if not paths:
             return
+        self._merge_list = dlg = MergeListDialog(self)
+        dlg.add_paths(paths)
         try:
-            packs, dropped = unique_packs([read_pack(Path(p)) for p in paths])
-        except PackError as exc:
-            QMessageBox.warning(self, "Merge", f"Not merged: {exc}")
-            return
-        if dropped:
-            QMessageBox.information(self, "Merge", "The same pack was chosen more than once; "
-                                    f"it is merged once. Left out: {', '.join(dropped)}")
-        if len(packs) < 2:
-            return
+            while dlg.exec() == QDialog.DialogCode.Accepted:
+                if self._merge_packs(list(dlg.packs), dlg):
+                    return
+        finally:
+            self._merge_list = None
+            dlg.deleteLater()
+
+    def _merge_packs(self, packs: list, merge_list=None) -> bool:
+        """Review, name and save the merge. False when cancelled or stopped (back to the
+        list, which shows the packs the review ended with)."""
+        packs = order_packs(packs)
         rows = review_merge(packs)
-        skipped = sum(p.skipped for p in packs)
         if not rows:
             QMessageBox.information(self, "Merge", "Nothing to merge: the packs have no "
                                     "samples fixed with Edit.")
-            return
-        dlg = PackReviewDialog(rows, "merge", title=f"Review merge — {len(packs)} packs",
-                               skipped=skipped, packs=packs,
-                               preview=lambda: ("", merge_sources(rows)), parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+            return False
+        made: list = []  # the review window, once built (the preview follows its rows)
+        dlg = PackReviewDialog(
+            rows, "merge", title="Review merge", skipped=sum(p.skipped for p in packs),
+            packs=packs, preview=lambda: ("", merge_sources(made[0].rows if made else rows)),
+            parent=self,
+            rebuild=review_merge,
+            add_packs=(lambda parent: merge_list.pick_more(parent, parent.packs))
+            if merge_list is not None else None)
+        made.append(dlg)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        if merge_list is not None:
+            merge_list.set_packs(dlg.packs)
+        rows = dlg.rows
+        if not accepted:
+            return False
         name, ok = QInputDialog.getText(
             self, "Merged pack name",
             "Your pack name (identifies your packs; each release adds a version):",
             text=self.data.provenance.last_name())
         name = clean_name(name)
         if not ok or not name:
-            return
+            return False
         version, changes, unchanged = merge_release_preview(self.data, name, rows)
         if unchanged:
             QMessageBox.information(self, "Merge", f"No changes since {name} v{version}: it "
@@ -532,14 +547,15 @@ class HistoryWindow(QWidget):
         out = save_file(self, f"Save merged pack {name} v{version}",
                         str(downloads_dir() / file_name(name, version)), "OCR data pack (*.zip)")
         if not out:
-            return
+            return False
         try:
             count = apply_merge(rows, Path(out), self.data.contributor(), name, self.data)
         except PackError as exc:
             QMessageBox.warning(self, "Merge", f"Not merged: {exc}")
-            return
+            return False
         QMessageBox.information(self, "Merge", f"Merged {name} v{version}: {count} samples "
                                                 f"saved to\n{out}")
+        return True
 
     def _test_set(self) -> None:
         folder = pick_folder(self, "Folder for the OCR test set", str(downloads_dir()))

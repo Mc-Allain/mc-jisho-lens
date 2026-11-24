@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from jisho_lens.core.categories import category_suggestions, category_summary, clean_category
@@ -41,16 +43,21 @@ from jisho_lens.core.ocr_data.packs import (
     KEEP_ALTERNATIVE,
     KEEP_MINE,
     NEW,
+    REMOVED,
     SAME,
     SAME_SENTENCE,
     STATUS_LABELS,
     USE_THEIRS,
     ReviewRow,
+    carry_choices,
     label_rows,
+    merge_contributions,
+    order_packs,
 )
 
 THUMB = QSize(200, 56)
-STATUS_COLORS = {NEW: "#5cbf6a", DIFFERS: "#e0a030", SAME_SENTENCE: "#6fb3e0", SAME: "#8a8f99"}
+STATUS_COLORS = {NEW: "#5cbf6a", DIFFERS: "#e0a030", SAME_SENTENCE: "#6fb3e0", SAME: "#8a8f99",
+                 REMOVED: "#c07070"}
 COL_INCLUDE, COL_IMAGE, COL_STATUS, COL_OCR, COL_BEFORE, COL_AFTER, COL_CHOICE, COL_FROM, \
     COL_CATEGORY, COL_SOURCE = range(10)
 NO_CATEGORY = "\x00none"  # filter value for rows without a category
@@ -192,12 +199,16 @@ class PackReviewDialog(QDialog):
     def __init__(self, rows: list[ReviewRow], mode: str = "import", *, title: str = "",
                  skipped: int = 0, space: tuple[float, int] | None = None,
                  show_images: bool = True, learn_option: bool = True, packs=None,
-                 preview=None, extra=None, on_change=None, parent=None) -> None:
+                 preview=None, extra=None, on_change=None, rebuild=None, add_packs=None,
+                 parent=None) -> None:
+        """Merge: `rebuild(packs) -> rows` lets packs be removed here (and `add_packs(parent)
+        -> packs to add` added); the rows update at once, keeping the choices made."""
         super().__init__(parent)
+        self._rebuild, self._add_packs = rebuild, add_packs
         self.rows, self.mode = rows, mode
         self._space = space  # (MB used now, limit MB) for the footer
         self._preview = preview  # () -> ("Using:" now, after) — kept up to date
-        self._packs = packs or []
+        self._packs = order_packs(list(packs)) if mode == "merge" and packs else (packs or [])
         self.changed_hooks = [on_change] if on_change else []  # called on any change
         # () -> "" or why the main button can't be pressed yet (e.g. no pack name)
         self.requirements: list = []
@@ -219,14 +230,8 @@ class PackReviewDialog(QDialog):
         intro.setWordWrap(True)
         self.status_filter = QComboBox()
         self.status_filter.addItem("All", None)
-        for status in (NEW, DIFFERS, SAME_SENTENCE, SAME):
-            n = sum(r.status == status for r in rows)
-            if n:
-                self.status_filter.addItem(f"{STATUS_LABELS[status]} ({n})", status)
         self.who_filter = QComboBox()
-        self.who_filter.addItem("All contributors", None)
-        for c in sorted({r.contributor for r in rows if r.contributor}):
-            self.who_filter.addItem(c[:8], c)
+        self._fill_filters()
         self.category_filter = QComboBox()
         for box in (self.status_filter, self.who_filter, self.category_filter):
             box.currentIndexChanged.connect(self._filter)
@@ -334,8 +339,31 @@ class PackReviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(intro)
-        for pack in self._packs:
-            layout.addLayout(self._pack_header(pack))
+        self._pack_labels: list = []  # (pack, label): merge shows what each pack brings
+        self._packs_box = QWidget()  # the packs at the top (rebuilt when packs change)
+        self._packs_layout = QVBoxLayout(self._packs_box)
+        self._packs_layout.setContentsMargins(0, 0, 0, 0)
+        # many packs scroll instead of making the window taller (up to PACKS_SHOWN rows)
+        self.packs_scroll = QScrollArea()
+        self.packs_scroll.setWidget(self._packs_box)
+        self.packs_scroll.setWidgetResizable(True)
+        self.packs_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.packs_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(self.packs_scroll)
+        self.add_packs_btn = QPushButton("Add packs…")
+        self.add_packs_btn.setToolTip("Add more packs to this merge (from any folder)")
+        self.add_packs_btn.clicked.connect(lambda _checked=False: self._add())
+        self.pack_note = QLabel()  # packs Add left out, and why
+        self.pack_note.setWordWrap(True)
+        self.pack_note.setStyleSheet("color: #d0a040;")
+        self.pack_note.setVisible(False)
+        if add_packs is not None:
+            add_bar = QHBoxLayout()
+            add_bar.addWidget(self.pack_note, 1)
+            add_bar.addStretch(1)
+            add_bar.addWidget(self.add_packs_btn)
+            layout.addLayout(add_bar)
+        self._show_packs()
         layout.addLayout(bar)
         layout.addLayout(cat_bar)
         layout.addWidget(self.table, 1)
@@ -362,15 +390,119 @@ class PackReviewDialog(QDialog):
         who = f" · by {html.escape(info.contributor[:8])}" if info and info.contributor \
             else ""
         extra = "" if info and info.has_history else " · no history (older pack)"
-        label = QLabel(f"<b>{html.escape(pack.label)}</b>{who} · "
-                       f"{len(pack.samples)} samples · file {html.escape(pack.name)}{extra}")
+        label = QLabel()
+        label.setProperty("head", f"<b>{html.escape(pack.label)}</b>{who} · "
+                          f"{len(pack.samples)} sample{'s' if len(pack.samples) != 1 else ''} · "
+                          f"file {html.escape(pack.name)}{extra}")
+        label.setText(label.property("head"))
+        self._pack_labels.append((pack, label))
         row.addWidget(label, 1)
         if info and info.log:
             button = QPushButton("History…")
             button.setToolTip(plain_tooltip(info.history_text()))
             button.clicked.connect(lambda _=False, i=info: self._show_history(i))
             row.addWidget(button)
+        if self._rebuild is not None:
+            remove = QPushButton("Remove")
+            remove.setToolTip("Take this pack out of the merge")
+            remove.setObjectName("remove_pack")
+            remove.setProperty("pack_label", pack.label)
+            remove.clicked.connect(lambda _=False, p=pack: self.remove_pack(p))
+            row.addWidget(remove)
         return row
+
+    def _show_packs(self) -> None:
+        """(Re)build the packs at the top."""
+        while self._packs_layout.count():
+            item = self._packs_layout.takeAt(0)
+            holder = item.widget()
+            if holder is not None:
+                holder.setParent(None)  # gone from the window at once
+                holder.deleteLater()
+        self._pack_labels = []
+        for pack in self._packs:
+            holder = QWidget()
+            line = self._pack_header(pack)
+            line.setContentsMargins(0, 0, 0, 0)
+            holder.setLayout(line)
+            self._packs_layout.addWidget(holder)
+        self._fit_packs_scroll()
+
+    PACKS_SHOWN = 4  # pack rows visible before the list scrolls
+
+    def _fit_packs_scroll(self) -> None:
+        """As tall as the packs, up to PACKS_SHOWN of them; more packs scroll."""
+        rows = [self._packs_layout.itemAt(i).widget()
+                for i in range(self._packs_layout.count())]
+        self.packs_scroll.setVisible(bool(rows))
+        if not rows:
+            return
+        spacing = self._packs_layout.spacing()
+        shown = rows[:self.PACKS_SHOWN]
+        height = sum(r.sizeHint().height() for r in shown) + spacing * (len(shown) - 1)
+        self.packs_scroll.setFixedHeight(height + 2)
+
+    @property
+    def packs(self) -> list:
+        return list(self._packs)
+
+    # ---------- packs added / removed here (merge)
+    def remove_pack(self, pack) -> bool:
+        from PySide6.QtWidgets import QMessageBox
+
+        if QMessageBox.question(
+                self, "Remove pack",
+                f"Take {pack.label} out of this merge?\n\nIts rows go, and choices made on "
+                "them are lost (add it again to start over).",
+                defaultButton=QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return False
+        self.set_packs([p for p in self._packs if p is not pack])
+        return True
+
+    def _add(self) -> None:
+        added, note = self._add_packs(self)
+        self.pack_note.setText(note)
+        self.pack_note.setVisible(bool(note))
+        if added:
+            self.set_packs(self._packs + list(added))
+
+    def set_packs(self, packs: list) -> None:
+        """The merge's packs changed: rebuild the rows, keeping the choices made."""
+        packs = order_packs(list(packs))
+        rows = self._rebuild(packs) if packs else []
+        carry_choices(self.rows, rows)
+        self._packs, self.rows = packs, rows
+        self._show_packs()
+        self.table.blockSignals(True)
+        self.table.clearContents()
+        self.table.setRowCount(len(rows))
+        self._fill()
+        self.table.blockSignals(False)
+        self._fill_filters()
+        self._refresh_categories()
+        self._filter()  # also updates the footer, counts and the main button
+        self._thumbs_done = 0
+        if not self.table.isColumnHidden(COL_IMAGE):
+            QTimer.singleShot(0, self._load_thumbs)
+
+    def _fill_filters(self) -> None:
+        """Status / contributor filters with counts (kept when still offered)."""
+        for box in (self.status_filter, self.who_filter):
+            box.blockSignals(True)
+        status, who = self.status_filter.currentData(), self.who_filter.currentData()
+        self.status_filter.clear()
+        self.status_filter.addItem("All", None)
+        for value in (NEW, DIFFERS, SAME_SENTENCE, REMOVED, SAME):
+            n = sum(r.status == value for r in self.rows)
+            if n:
+                self.status_filter.addItem(f"{STATUS_LABELS[value]} ({n})", value)
+        self.who_filter.clear()
+        self.who_filter.addItem("All contributors", None)
+        for c in sorted({r.contributor for r in self.rows if r.contributor}):
+            self.who_filter.addItem(c[:8], c)
+        for box, value in ((self.status_filter, status), (self.who_filter, who)):
+            box.setCurrentIndex(max(0, box.findData(value)))
+            box.blockSignals(False)
 
     def _show_history(self, info) -> None:
         dlg = QDialog(self)
@@ -395,14 +527,18 @@ class PackReviewDialog(QDialog):
             self.table.setItem(i, COL_INCLUDE, check)
             self.table.setItem(i, COL_IMAGE, QTableWidgetItem())
             status = QTableWidgetItem()
+            label = (f"Removed in {row.removed_in}" if row.status == REMOVED
+                     else STATUS_LABELS[row.status])
             status.setData(_HTML, f"<b style='color:{STATUS_COLORS[row.status]}'>"
-                                  f"{STATUS_LABELS[row.status]}</b>")
+                                  f"{html.escape(label)}</b>")
             status.setToolTip({
                 NEW: "You don't have this picture (or have it without a right answer)",
                 DIFFERS: "You have this picture with a different right answer",
                 SAME_SENTENCE: "Another crop of a sentence you already have (skipped by "
                                "default to save space)",
                 SAME: "Already identical in your data: nothing to import",
+                REMOVED: "An older version of this pack has it, but its newer version in this "
+                         "merge dropped it (unticked; tick it to bring it back)",
             }[row.status])
             self.table.setItem(i, COL_STATUS, status)
             ocr = QTableWidgetItem()
@@ -611,7 +747,7 @@ class PackReviewDialog(QDialog):
 
     def _update_footer(self) -> None:
         chosen = [r for r in self.rows if r.include and r.status != SAME]
-        new = [r for r in chosen if r.status in (NEW, SAME_SENTENCE)]
+        new = [r for r in chosen if r.status in (NEW, SAME_SENTENCE, REMOVED)]
         differs = sum(r.status == DIFFERS for r in chosen)
         mb = sum(r.size for r in new) / 1024 / 1024
         if self.mode == "export":
@@ -631,9 +767,36 @@ class PackReviewDialog(QDialog):
                              "unchecked samples will be removed (imported samples are fixed "
                              "ones and are kept).</span>")
         self.footer.setText(text)
+        self._update_pack_counts()
         for hook in getattr(self, "changed_hooks", []):
             hook()
         self.refresh_ok()
+
+    def pack_counts(self) -> dict[int, int]:
+        """Merge: records each pack brings with the choices made now (by id(pack))."""
+        return merge_contributions(self.rows)
+
+    def _update_pack_counts(self) -> None:
+        """Merge: 'N records in this merge' per pack; red when it brings nothing (it is
+        then left out of the merged pack's sources and history log)."""
+        if self.mode != "merge":
+            return
+        counts = self.pack_counts()
+        for pack, label in getattr(self, "_pack_labels", []):
+            n = counts.get(id(pack), 0)
+            head = label.property("head")
+            if n:
+                label.setText(f"{head} · <b>{n} record{'s' if n != 1 else ''} in this "
+                              "merge</b>")
+                label.setStyleSheet("")
+                label.setToolTip("")
+            else:
+                label.setText(f"{head} · <b>0 records in this merge</b> (not in the history "
+                              "log)")
+                label.setStyleSheet("color: #e05555;")
+                label.setToolTip("Nothing from this pack is included (unticked, another "
+                                 "pack's answer chosen, or the same as an earlier pack), so "
+                                 "it isn't listed in the merged pack's history log.")
 
     def refresh_ok(self) -> None:
         """Enable the main button, or say why it can't be pressed yet."""
@@ -642,6 +805,9 @@ class PackReviewDialog(QDialog):
         verb = {"import": "import", "merge": "merge", "export": "export"}[self.mode]
         reasons = [] if any(r.include and r.status != SAME for r in self.rows) else [
             f"Tick at least one row to {verb}."]
+        if self.mode == "merge" and self._rebuild is not None and len(self._packs) < 2:
+            reasons = [f"A merge needs two or more packs ({len(self._packs)} here): add "
+                       "one with Add packs…."]
         reasons += [r for r in (req() for req in self.requirements) if r]
         self.ok_btn.setEnabled(not reasons)
         text = " ".join(reasons)

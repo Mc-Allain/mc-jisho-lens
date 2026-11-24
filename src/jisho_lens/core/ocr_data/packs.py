@@ -50,8 +50,9 @@ NEW = "new"  # an image you don't have (or have without a right answer)
 SAME = "same"  # you already have this image with the same answer: nothing to do
 DIFFERS = "differs"  # same image, a different right answer
 SAME_SENTENCE = "same_sentence"  # another crop of a sentence you already have
+REMOVED = "removed"  # merge: an older version has it, a newer one of the same pack dropped it
 STATUS_LABELS = {NEW: "New", SAME: "Same", DIFFERS: "Different answer",
-                 SAME_SENTENCE: "Same sentence"}
+                 SAME_SENTENCE: "Same sentence", REMOVED: "Removed in newer version"}
 
 # what to do with a "differs" row
 KEEP_MINE, USE_THEIRS, KEEP_ALTERNATIVE = "mine", "theirs", "alternative"
@@ -357,6 +358,7 @@ class ReviewRow:
     choice: str | int = KEEP_MINE  # import "differs": mine / theirs / alternative;
     #                                merge "differs": answer index or ALL_ANSWERS
     local_id: str | None = None  # same_sentence: your sample of that sentence
+    removed_in: str = ""  # REMOVED: the newer version that dropped it ("KaiOCR v4")
 
     @property
     def after(self) -> str:
@@ -422,15 +424,63 @@ def review_import(store: OcrDataStore, pack: Pack) -> list[ReviewRow]:
     return rows
 
 
+def series_key(pack) -> tuple[str, str] | None:
+    """Versions of one pack share this: its name and who first released it (two people can
+    use the same name). None for packs made before packs had names."""
+    info = getattr(pack, "info", None)
+    if info is None or not info.name:
+        return None
+    mine = [e for e in info.log if e.name == info.name]
+    creator = min(mine, key=lambda e: e.version).contributor if mine else info.contributor
+    return (info.name.lower(), creator)
+
+
+def order_packs(packs: list) -> list:
+    """Newest version first among versions of the same pack (where the first of them was);
+    other packs keep their order."""
+    groups: dict = {}
+    for pack in packs:
+        groups.setdefault(series_key(pack) or id(pack), []).append(pack)
+    out, placed = [], set()
+    for pack in packs:
+        key = series_key(pack) or id(pack)
+        if key in placed:
+            continue
+        placed.add(key)
+        out.extend(sorted(groups[key], key=lambda p: -p.info.version)
+                   if series_key(pack) else groups[key])
+    return out
+
+
+def _newest_versions(packs: list) -> dict[int, object]:
+    """id(pack) -> the newest version of the same pack in `packs` (itself if newest)."""
+    newest: dict = {}
+    for pack in packs:
+        key = series_key(pack)
+        if key and (key not in newest or pack.info.version > newest[key].info.version):
+            newest[key] = pack
+    return {id(p): newest.get(series_key(p), p) for p in packs}
+
+
 def review_merge(packs: list[Pack]) -> list[ReviewRow]:
-    """One row per image across the packs. Packs that disagree on an image give a
-    "Different answer" row listing each answer (default: keep them all). Another crop of a
-    sentence already in an earlier pack is "Same sentence" (excluded by default)."""
+    """One row per image across the packs, newest version first among versions of the
+    same pack. Packs that disagree on an image give a "Different answer" row listing each
+    answer (default: keep them all). Another crop of a sentence already in an earlier pack
+    is "Same sentence" (excluded by default). An image an older version has but the newest
+    version of that pack in the merge dropped is "Removed in <newer>" (excluded by
+    default): it is only listed when no other pack brings it."""
+    packs = order_packs(packs)
+    newest = _newest_versions(packs)
     by_id: dict[str, ReviewRow] = {}
     first_by_key: dict[str, str] = {}
     rows: list[ReviewRow] = []
+    removed: list[tuple[Pack, str, Sample]] = []
     for pack in packs:
         for sid, s in pack.samples.items():
+            latest = newest[id(pack)]
+            if latest is not pack and sid not in latest.samples:
+                removed.append((pack, sid, s))
+                continue
             answers = _incoming_answers(s, pack)
             row = by_id.get(sid)
             if row is not None:
@@ -453,6 +503,13 @@ def review_merge(packs: list[Pack]) -> list[ReviewRow]:
                                 choice=ALL_ANSWERS if status == DIFFERS else KEEP_MINE)
             by_id[sid] = row
             rows.append(row)
+    for pack, sid, s in removed:  # dropped by a newer version: listed, not included
+        if sid in by_id:
+            continue  # another pack brings it; this old answer isn't offered again
+        row = ReviewRow(sid, REMOVED, s.ocr_text, None, _incoming_answers(s, pack), s, pack,
+                        include=False, removed_in=newest[id(pack)].label)
+        by_id[sid] = row
+        rows.append(row)
     return rows
 
 
@@ -631,10 +688,49 @@ def apply_import(store: OcrDataStore, rows: list[ReviewRow], corrections=None
     return result
 
 
+def carry_choices(old: list[ReviewRow], new: list[ReviewRow]) -> None:
+    """After packs were added or removed: rows still there keep what the user chose (tick,
+    category, the answer used); rows whose status changed start from their defaults, but
+    keep their category."""
+    before = {r.sid: r for r in old}
+    for row in new:
+        prev = before.get(row.sid)
+        if prev is None:
+            continue
+        row.category = prev.category
+        if prev.status != row.status:
+            continue
+        row.include = prev.include
+        if row.status == DIFFERS and isinstance(prev.choice, int) and prev.choice >= 0 \
+                and prev.choice < len(prev.answers):
+            chosen = prev.answers[prev.choice]
+            row.choice = next((i for i, a in enumerate(row.answers)
+                               if a.truth == chosen.truth and a.pack == chosen.pack),
+                              ALL_ANSWERS)
+
+
+def merge_contributions(rows: list[ReviewRow]) -> dict[int, int]:
+    """Records each pack brings to the merge as chosen, by id(pack): an included row counts
+    for the pack(s) whose answer is kept (the chosen one, or every answer when all are
+    kept). A pack that only repeats an image with the same answer brings nothing."""
+    counts: dict[int, int] = {}
+    for row in rows:
+        if not row.include:
+            continue
+        if isinstance(row.choice, int) and 0 <= row.choice < len(row.answers):
+            kept = [row.answers[row.choice]]
+        else:
+            kept = row.answers
+        for pack_id in {id(a.source or row.pack) for a in kept}:
+            counts[pack_id] = counts.get(pack_id, 0) + 1
+    return counts
+
+
 def merge_sources(rows: list[ReviewRow]) -> str:
     """'RavenOCR v2 + KaiOCR v4 (partial)': a pack is partial when some of its samples or
     answers were left out by the user's choice (unticked, or another pack's answer used).
-    Skipped duplicates (Same sentence) don't count."""
+    Skipped duplicates (Same sentence) don't count. A pack bringing nothing is left out."""
+    counts = merge_contributions(rows)
     packs: list[Pack] = []
     partial: set[int] = set()
     for row in rows:
@@ -646,7 +742,8 @@ def merge_sources(rows: list[ReviewRow]) -> str:
         elif row.status == DIFFERS and isinstance(row.choice, int) and row.choice >= 0:
             partial.update(id(a.source or row.pack) for i, a in enumerate(row.answers)
                            if i != row.choice)
-    return " + ".join(p.label + (" (partial)" if id(p) in partial else "") for p in packs)
+    return " + ".join(p.label + (" (partial)" if id(p) in partial else "") for p in packs
+                      if counts.get(id(p)))
 
 
 def apply_merge(rows: list[ReviewRow], output: Path, contributor: str | None = None,
@@ -682,7 +779,11 @@ def apply_merge(rows: list[ReviewRow], output: Path, contributor: str | None = N
             release = release_entry(provenance_store, name, "merged", merge_sources(rows),
                                     store.all())
             entry, unchanged = release[0], release[1]
-            pack_logs = {id(r.pack): r.pack.info.log for r in rows if r.pack.info}
+            # the logs of the packs that bring something (not of packs left out)
+            counts = merge_contributions(rows)
+            pack_logs = {id(p): p.info.log for r in rows
+                         for p in [r.pack] + [a.source for a in r.answers if a.source]
+                         if p.info and counts.get(id(p))}
             log = merge_logs([] if unchanged else [entry],
                              provenance_store.provenance.series_log(entry.name),
                              *pack_logs.values())
