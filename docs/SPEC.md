@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-Jisho Lens is a Windows desktop tool for reading Japanese text in games. You press a hotkey, drag a rectangle around Japanese text on the screen, and the app reads it (OCR) and shows it in an always-on-top window. You can click any word to see how it is read in that sentence, its romaji, and its meanings, then click a kanji inside it to see all its readings. An English translation is shown only when you ask for it.
+Jisho Lens is a Windows desktop tool for reading Japanese text in games. You press a hotkey, drag a rectangle around Japanese text on the screen, and the app reads it (OCR) and shows it in an always-on-top window. You can click any word to see how it is read in that sentence, its romaji, and its meanings, then click a kanji inside it to see all its readings. With a DeepL key, each capture is translated to English automatically (auto translate, on by default); it can be switched off so translation happens only when you ask for it.
 
 The goal is **learning to read**, not just understanding the game, so the Japanese comes first and the English is opt-in.
 
@@ -22,7 +22,7 @@ Also seen: HUD quest tracker and prompts (small, semi-transparent), tutorial tex
 - On-demand capture of horizontal Japanese game text.
 - Word-level lookup with context-correct readings, romaji, meanings, and kanji details.
 - Furigana and romaji display toggles.
-- English translation via DeepL on button press.
+- English translation via DeepL: automatic for each capture (default) or on button press.
 - Fully offline except translation.
 - Modular: optional features can be installed, enabled, disabled, and removed after installation.
 
@@ -127,6 +127,7 @@ With no UniDic installed there is no word splitting: the window shows plain OCR 
 
 **Settings**
 - General: hotkey, start with Windows, window behaviour, theme.
+- Translation: DeepL key, auto translate, translation cache size, remembered terms, delete translation data.
 - OCR: engine, preprocessing defaults, CPU/GPU.
 - Display: furigana / romaji defaults, font size.
 - Plus a page per enabled module.
@@ -149,11 +150,25 @@ With no UniDic installed there is no word splitting: the window shows plain OCR 
 - If the module is disabled, clicking a word shows only the reading and romaji from the core.
 
 ### 3.3 Translation — DeepL (default)
-- Translate button sends the current text to the DeepL API (Free or Pro, detected from the key).
+- **Auto translate** (on by default): each capture is sent to the DeepL API (Free or Pro, detected from the key) as soon as it is read.
+  - On: the window shows the English, and the captured Japanese text is hidden by default; the setting **Show the captured text with the translation** (off by default) shows both.
+  - Off: the captured text is always shown; the Translate button sends it on demand.
+  - When there is no translation (no key, no network, quota used up, error) the captured text is shown, with the reason.
 - Without a key, the app still works; the Translate button shows "Add a DeepL key in Settings".
 - First launch asks for the key (skippable).
 - Key stored in Windows Credential Manager (`keyring`), not in plain-text config.
-- Translations are cached per text so repeats cost nothing.
+- **DeepL cache**: every DeepL translation is kept on this computer per Japanese text, so the same text again is shown at once without asking DeepL (fast, no quota, works offline). Size limit in Settings; never in translation packs.
+- **Translation data** (local only; works like OCR data, see §3.1 and PLAN Phase 5):
+  - **Translation records** (corrected translations, and DeepL translations marked ✓), stored separately from OCR data and History and linked only by the Japanese text: one per Japanese text (ignoring spaces and line breaks) with the Japanese, speaker name, the corrected translation and name translation, category, source pack, contributor ID. DeepL's translations stay in the DeepL cache, not in records.
+  - **Edit translation** corrects the English and the speaker's name in English (Save Edit / Cancel). A translation equal to DeepL's is not a correction. **✓ Good translation** marks DeepL's as right (kept locally, not shared).
+  - The same text again always shows the corrected translation instead of asking DeepL (also without a key or network), marked "Corrected translation".
+  - **Undo Fix** shows DeepL's translation without saving, **Redo Fix** shows the correction again, **Save Undo** keeps DeepL's and removes the correction (Save Edit after Undo Fix does the same).
+  - **Remembered term fixes**: a term fixed in a translation (e.g. キボ → Kibo) can be remembered and sent to DeepL as a glossary for other texts; kept only while a corrected translation still has it.
+  - History shows each capture's translation, a filter **Corrected translation**, and keeps all captures of a text in step; favorites protect their corrected translation from deletion.
+  - **Manage translation data** lists every record (DeepL → corrected with differences highlighted, source pack, category, In History): filter, edit (Prev/Next), label or remove a category, delete. Deleting corrected translations asks you to type **delete**.
+  - The text window shows what the data is made of: **Translations: KaiTL v3 (partial) + own data**.
+  - **Editing the Japanese** (Edit, Save Undo, Manage OCR data) updates the OCR data record in place. If the new text already has a corrected translation, it is shown. Otherwise the app asks: with a corrected translation of the old text, keep it for the new text or ask DeepL; with only DeepL's, whether DeepL should translate the corrected Japanese (No: the translation is removed from the window). Nothing is saved for the new text unless you choose it; the old text keeps its corrected translation, if it had one. The English speaker name is kept when the Japanese name is fixed, unless the new name has its own.
+- **Translation packs**: exported, imported and merged like OCR data packs (`.zip` with `manifest.json` + `translations.json`, no images; only corrected translations, never the DeepL cache). Each export or merge is a release with a name, a version that goes up only when the contents changed, a history log and categories. Import, merge and export open a review window first (before / after with differences highlighted; status New / Different translation / Same / Removed in vN; include or exclude each row; Keep mine / Use theirs / Keep as alternative); nothing changes until you confirm, and an imported translation never replaces yours unless you choose it. Merging starts from a **Merge packs** list (Add / Remove / Merge / Cancel); the merge review shows how many records each pack brings (none: red, left out of the history log), merges versions of one pack newest first, and lets you add or remove packs with the rows updating at once.
 - Built on a **translation provider interface** so other providers can be added later.
 
 ### 3.4 Anki (optional)
@@ -214,6 +229,7 @@ The core never imports a module directly; it only talks through these points. A 
 | Settings | `%APPDATA%\mc-jisho-lens\settings.toml` | TOML |
 | DeepL key | Windows Credential Manager | — |
 | History + capture images | `%LOCALAPPDATA%\mc-jisho-lens\history.db` + `captures\` | SQLite + PNG |
+| Translation data (records, DeepL cache, remembered terms, pack history) | `%LOCALAPPDATA%\mc-jisho-lens\translation-data\` | JSON |
 | Components (UniDic, JMdict, KANJIDIC2, Wiktionary) | Development: `data/components/`; installed: `%LOCALAPPDATA%\mc-jisho-lens\components\` (`JISHO_LENS_COMPONENTS` overrides) | One folder each; dictionaries as read-only SQLite |
 | Installed modules | `%LOCALAPPDATA%\mc-jisho-lens\modules\` | Folders |
 | Anki queue | Inside the Anki module's data folder | SQLite |
@@ -280,3 +296,5 @@ The core never imports a module directly; it only talks through these points. A 
 - Default hotkey: is `Ctrl+Alt+J` free in your games?
 - Where module releases are hosted (e.g. GitHub Releases on the project repo).
 - User glossary for game terms: core feature or part of the Dictionary module? (Not in v1.)
+- Remembered term fixes rely on DeepL glossaries: check that Japanese → English glossaries work with Free keys and what their size limits are; without them, terms would have to be replaced after translation.
+- Translation pack names: one name for both kinds of pack (e.g. `KaiOCR`) or separate names (e.g. `KaiTL`)?
